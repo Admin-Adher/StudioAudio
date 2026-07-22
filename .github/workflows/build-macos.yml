@@ -1,0 +1,290 @@
+name: Construire Studio Audio pour macOS
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version numérique du logiciel (ex. 0.2.0)"
+        required: true
+        default: "0.2.0"
+        type: string
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: studio-audio-macos-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: macOS Apple Silicon (arm64)
+    runs-on: macos-15
+    timeout-minutes: 120
+
+    steps:
+      - name: Télécharger le projet
+        uses: actions/checkout@v6
+
+      - name: Installer Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: packaging/requirements-macos.txt
+
+      - name: Vérifier le runner Apple Silicon
+        shell: bash
+        run: |
+          set -euo pipefail
+          ACTUAL_ARCH="$(uname -m)"
+          if [[ "$ACTUAL_ARCH" != "arm64" ]]; then
+            echo "Runner $ACTUAL_ARCH, architecture arm64 attendue." >&2
+            exit 1
+          fi
+          python3.12 -c 'import platform; print("Python:", platform.python_version(), platform.machine())'
+
+      - name: Construire le véritable .app et le DMG arm64
+        id: package
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ inputs.version || github.ref_name }}
+          MACOS_PYTHON: python3.12
+        run: |
+          set -euo pipefail
+          VERSION="${RELEASE_VERSION#v}"
+          bash scripts/build_desktop_macos.sh "$VERSION" arm64
+
+      - name: Tester le véritable Studio Audio.app du DMG
+        id: smoke
+        shell: bash
+        timeout-minutes: 8
+        env:
+          DMG_PATH: ${{ steps.package.outputs.dmg }}
+          SMOKE_TIMEOUT_SECONDS: "240"
+        run: |
+          set -euo pipefail
+          : "${DMG_PATH:?Le build ne fournit pas le chemin du DMG}"
+          test -f "$DMG_PATH"
+
+          MOUNT_POINT="$RUNNER_TEMP/studio-audio-smoke-volume"
+          SMOKE_DATA="$RUNNER_TEMP/studio-audio-smoke-data"
+          SMOKE_LOG="$GITHUB_WORKSPACE/output/desktop/macos/arm64/smoke"
+          rm -rf -- "$MOUNT_POINT" "$SMOKE_DATA" "$SMOKE_LOG"
+          mkdir -p "$MOUNT_POINT" "$SMOKE_DATA" "$SMOKE_LOG"
+
+          cleanup() {
+            status=$?
+            trap - EXIT
+            set +e
+            detach_status=0
+            hdiutil detach "$MOUNT_POINT" >>"$SMOKE_LOG/detach.log" 2>&1 || \
+              hdiutil detach -force "$MOUNT_POINT" >>"$SMOKE_LOG/detach.log" 2>&1 || \
+              detach_status=$?
+            if [[ "$status" -eq 0 && "$detach_status" -ne 0 ]]; then
+              status="$detach_status"
+            fi
+            exit "$status"
+          }
+          trap cleanup EXIT
+
+          hdiutil attach -nobrowse -readonly \
+            -mountpoint "$MOUNT_POINT" "$DMG_PATH" \
+            >"$SMOKE_LOG/attach.log" 2>&1
+
+          export STUDIO_AUDIO_APP="$MOUNT_POINT/Studio Audio.app"
+          export STUDIO_AUDIO_EXECUTABLE="$STUDIO_AUDIO_APP/Contents/MacOS/TranscriptionLocale"
+          export STUDIO_AUDIO_SMOKE_DATA="$SMOKE_DATA"
+          export STUDIO_AUDIO_SMOKE_LOG="$SMOKE_LOG"
+          export TRANSCRIPTION_APP_DATA_DIR="$SMOKE_DATA"
+          export GRADIO_ANALYTICS_ENABLED=False
+          export HF_HUB_DISABLE_TELEMETRY=1
+          export DO_NOT_TRACK=1
+          export TOKENIZERS_PARALLELISM=false
+
+          test -d "$STUDIO_AUDIO_APP"
+          test -x "$STUDIO_AUDIO_EXECUTABLE"
+          file "$STUDIO_AUDIO_EXECUTABLE" | tee "$SMOKE_LOG/executable.txt"
+          EXECUTABLE_ARCHS="$(lipo -archs "$STUDIO_AUDIO_EXECUTABLE")"
+          echo "$EXECUTABLE_ARCHS" | tee -a "$SMOKE_LOG/executable.txt"
+          if [[ "$EXECUTABLE_ARCHS" != "arm64" ]]; then
+            echo "Le binaire livré doit contenir uniquement arm64, trouvé : $EXECUTABLE_ARCHS" >&2
+            exit 1
+          fi
+          codesign --verify --deep --strict --verbose=2 "$STUDIO_AUDIO_APP" \
+            >"$SMOKE_LOG/codesign.log" 2>&1
+
+          python3.12 <<'PY'
+          import json
+          import os
+          import shutil
+          import signal
+          import subprocess
+          import sys
+          import time
+          from pathlib import Path
+
+          executable = Path(os.environ["STUDIO_AUDIO_EXECUTABLE"])
+          data_root = Path(os.environ["STUDIO_AUDIO_SMOKE_DATA"])
+          log_root = Path(os.environ["STUDIO_AUDIO_SMOKE_LOG"])
+          timeout = int(os.environ.get("SMOKE_TIMEOUT_SECONDS", "240"))
+          stdout_path = log_root / "smoke.stdout.log"
+          stderr_path = log_root / "smoke.stderr.log"
+          verification_path = log_root / "verification.json"
+          log_root.mkdir(parents=True, exist_ok=True)
+          data_root.mkdir(parents=True, exist_ok=True)
+
+          def group_exists(pgid: int) -> bool:
+              try:
+                  os.killpg(pgid, 0)
+                  return True
+              except ProcessLookupError:
+                  return False
+              except PermissionError:
+                  return True
+
+          def signal_group(pgid: int, sig: signal.Signals) -> None:
+              try:
+                  os.killpg(pgid, sig)
+              except ProcessLookupError:
+                  pass
+
+          def stop_running_group(process: subprocess.Popen[bytes]) -> None:
+              signal_group(process.pid, signal.SIGTERM)
+              try:
+                  process.wait(timeout=5)
+              except subprocess.TimeoutExpired:
+                  signal_group(process.pid, signal.SIGKILL)
+                  process.wait(timeout=5)
+              if group_exists(process.pid):
+                  signal_group(process.pid, signal.SIGKILL)
+                  deadline = time.monotonic() + 3
+                  while group_exists(process.pid) and time.monotonic() < deadline:
+                      time.sleep(0.05)
+
+          process = None
+          returncode = None
+          timed_out = False
+          lingering_after_exit = False
+          launch_error = None
+          try:
+              env = os.environ.copy()
+              with stdout_path.open("wb") as stdout_file, stderr_path.open("wb") as stderr_file:
+                  process = subprocess.Popen(
+                      [str(executable), "--smoke-test"],
+                      cwd=os.environ["GITHUB_WORKSPACE"],
+                      env=env,
+                      stdout=stdout_file,
+                      stderr=stderr_file,
+                      start_new_session=True,
+                  )
+                  try:
+                      returncode = process.wait(timeout=timeout)
+                  except subprocess.TimeoutExpired:
+                      timed_out = True
+                      stop_running_group(process)
+                      returncode = process.returncode
+                  else:
+                      lingering_after_exit = group_exists(process.pid)
+                      if lingering_after_exit:
+                          signal_group(process.pid, signal.SIGTERM)
+                          time.sleep(0.5)
+                          if group_exists(process.pid):
+                              signal_group(process.pid, signal.SIGKILL)
+          except Exception as exc:
+              launch_error = f"{type(exc).__name__}: {exc}"
+              if process is not None and process.poll() is None:
+                  stop_running_group(process)
+                  returncode = process.returncode
+          finally:
+              if process is not None and process.poll() is None:
+                  stop_running_group(process)
+                  returncode = process.returncode
+              app_log = data_root / "logs" / "application.log"
+              if app_log.is_file():
+                  shutil.copy2(app_log, log_root / "application.log")
+
+          stdout_text = stdout_path.read_text(encoding="utf-8", errors="replace") if stdout_path.exists() else ""
+          stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace") if stderr_path.exists() else ""
+          report = None
+          for line in reversed(stdout_text.splitlines()):
+              try:
+                  candidate = json.loads(line)
+              except json.JSONDecodeError:
+                  continue
+              if isinstance(candidate, dict) and candidate.get("mode") == "desktop-smoke":
+                  report = candidate
+                  break
+
+          failures = []
+          if launch_error:
+              failures.append(launch_error)
+          if timed_out:
+              failures.append(f"délai dépassé après {timeout} s")
+          if returncode != 0:
+              failures.append(f"code de sortie {returncode}")
+          if lingering_after_exit:
+              failures.append("un processus du bundle est resté actif après la fin")
+          if report is None:
+              failures.append("rapport JSON desktop-smoke absent")
+          else:
+              if report.get("status") != "ok":
+                  failures.append(f"statut smoke inattendu : {report.get('status')!r}")
+              if report.get("clean_shutdown") is not True:
+                  failures.append("clean_shutdown n'est pas vrai")
+              http_status = report.get("http_status")
+              if not isinstance(http_status, int) or not 200 <= http_status < 400:
+                  failures.append(f"statut HTTP invalide : {http_status!r}")
+
+          verification = {
+              "executable": str(executable),
+              "returncode": returncode,
+              "timed_out": timed_out,
+              "lingering_after_exit": lingering_after_exit,
+              "report": report,
+              "failures": failures,
+          }
+          verification_path.write_text(
+              json.dumps(verification, ensure_ascii=False, indent=2, sort_keys=True),
+              encoding="utf-8",
+          )
+          print(json.dumps(verification, ensure_ascii=False, sort_keys=True))
+          if failures:
+              if stderr_text:
+                  print(stderr_text[-12000:], file=sys.stderr)
+              raise SystemExit(1)
+          PY
+
+      - name: Publier les journaux si le véritable .app échoue
+        if: ${{ failure() && steps.smoke.outcome == 'failure' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: StudioAudio-macOS-arm64-smoke-echec
+          path: output/desktop/macos/arm64/smoke/**
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Publier uniquement le DMG arm64 validé
+        uses: actions/upload-artifact@v7
+        with:
+          name: StudioAudio-macOS-arm64
+          path: ${{ steps.package.outputs.dmg }}
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Résumé de livraison
+        shell: bash
+        run: |
+          {
+            echo "### Studio Audio macOS arm64"
+            echo
+            echo "Le seul livrable publié est le **DMG Apple Silicon**."
+            echo "Le véritable \`Studio Audio.app\` contenu dans ce DMG a été monté, lancé et validé automatiquement."
+            echo "Le test contrôle les ressources embarquées, le serveur local, sa réponse HTTP et son arrêt propre."
+            echo
+            echo "> Ce build interne est signé ad hoc. Au premier lancement, macOS peut demander clic droit → Ouvrir."
+          } >> "$GITHUB_STEP_SUMMARY"

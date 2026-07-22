@@ -1,0 +1,41 @@
+.venv*/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.playwright-cli/
+.DS_Store
+.env
+.env.*
+!.env.example
+
+# Données et modèles locaux
+modeles/
+donnees/
+cache/
+logs/
+resultats/*
+!resultats/.gitkeep
+
+# Builds et paquets générés
+output/
+packages/
+build/
+dist/
+*.dmg
+*.app.zip
+*.exe
+*.msi
+
+# État d'exécution local
+desktop.lock
+desktop-session.json
+*.log
+
+# Les enregistrements ne doivent jamais être publiés avec le code source.
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.ogg
+*.aac

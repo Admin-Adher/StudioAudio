@@ -1,0 +1,27 @@
+# Dépendances du véritable bundle macOS natif (WKWebView + moteur local).
+#
+# Ce fichier est volontairement indépendant de requirements.txt : Torch 2.8
+# ne publie plus de roue macOS Intel, alors que la version 2.2.2 couvre encore
+# les Mac x86_64. Chaque build GitHub s'exécute sur l'architecture native visée.
+
+faster-whisper==1.2.1
+diarize==0.1.2
+gradio==6.20.0
+python-docx==1.2.0
+
+# Versions disponibles pour arm64 comme x86_64 et compatibles macOS 12+.
+av==13.1.0
+onnxruntime==1.19.2
+
+# Apple Silicon : moteur actuel. Mac Intel : dernière combinaison Torch audio
+# disposant encore de roues macOS x86_64 pour Python 3.12.
+torch==2.8.0; platform_machine == "arm64"
+torchaudio==2.8.0; platform_machine == "arm64"
+torch==2.2.2; platform_machine == "x86_64"
+torchaudio==2.2.2; platform_machine == "x86_64"
+numpy<2; platform_machine == "x86_64"
+
+# pywebview utilise WKWebView/Cocoa : il s'agit bien d'une fenêtre
+# d'application locale, et non d'un site distant emballé dans Electron.
+pywebview>=5.4,<7
+pyinstaller>=6.11,<7

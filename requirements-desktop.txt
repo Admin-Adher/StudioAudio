@@ -1,0 +1,5 @@
+-r requirements.txt
+
+# La fenêtre native utilise Edge WebView2 sous Windows et WKWebView sous macOS.
+pywebview>=5.4,<7
+pyinstaller>=6.11,<7
