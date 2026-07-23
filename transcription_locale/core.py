@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import gc
+import logging
 import os
 import re
 import sys
 import tempfile
 import threading
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -34,6 +35,7 @@ OPENVINO_CHUNK_OVERLAP_SECONDS = 2.0
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 os.environ.setdefault("DO_NOT_TRACK", "1")
 os.environ.setdefault("WESPEAKER_HOME", str(WESPEAKER_MODEL_DIR))
+LOGGER = logging.getLogger(__name__)
 
 
 def openvino_arc_supported(platform: str | None = None) -> bool:
@@ -600,6 +602,7 @@ def _transcribe_words_openvino(
         )
         if backend_warnings is not None:
             backend_warnings.append(warning)
+        LOGGER.warning(warning)
         _progress(progress, 0.12, "Repli automatique vers Faster-Whisper…")
         if before_cpu_fallback is not None:
             before_cpu_fallback()
@@ -1096,7 +1099,14 @@ def run_pipeline(
             if not diarization_future.done():
                 _progress(report_progress, wait_progress, wait_message)
             try:
-                parallel_diarization_result = diarization_future.result()
+                while True:
+                    try:
+                        parallel_diarization_result = diarization_future.result(
+                            timeout=1.0
+                        )
+                        break
+                    except FutureTimeoutError:
+                        _progress(report_progress, wait_progress, wait_message)
                 diarization_published.wait()
             except Exception:
                 _progress(
@@ -1121,7 +1131,7 @@ def run_pipeline(
             resolve_parallel_diarization(
                 wait_progress=0.20,
                 wait_message=(
-                    "Intel Arc indisponible ; finalisation de la séparation "
+                    "Intel Arc indisponible ; séparation des voix en cours "
                     "avant le repli CPU…"
                 ),
             )

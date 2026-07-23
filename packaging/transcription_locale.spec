@@ -17,7 +17,7 @@ from PyInstaller.utils.hooks import (
 # ``SPECPATH`` est le dossier qui contient ce fichier spec (``packaging``),
 # pas le chemin du fichier lui-même. Le projet se trouve donc un niveau plus haut.
 project_root = Path(SPECPATH).resolve().parent
-app_version = os.environ.get("TRANSCRIPTION_DESKTOP_VERSION", "0.3.2")
+app_version = os.environ.get("TRANSCRIPTION_DESKTOP_VERSION", "0.3.8")
 windows_icon = project_root / "assets" / "app-icon.ico"
 macos_icon = project_root / "assets" / "app-icon.icns"
 is_macos = sys.platform == "darwin"
@@ -71,6 +71,68 @@ datas = [(str(project_root / "assets"), "assets")]
 binaries = []
 hiddenimports = []
 
+bundled_assistant_value = os.environ.get(
+    "TRANSCRIPTION_BUNDLED_ASSISTANT_MODEL_DIR",
+    "",
+).strip()
+bundled_assistant_kind = os.environ.get(
+    "TRANSCRIPTION_BUNDLED_ASSISTANT_MODEL_KIND",
+    "",
+).strip().lower()
+if bundled_assistant_value:
+    bundled_assistant_dir = Path(bundled_assistant_value).expanduser().resolve()
+    expected_kind = "mlx" if is_macos else "openvino"
+    if bundled_assistant_kind != expected_kind:
+        raise ValueError(
+            "Le runtime du modèle assistant embarqué doit être "
+            f"{expected_kind!r} sur cette plateforme "
+            f"(reçu : {bundled_assistant_kind!r})."
+        )
+    if expected_kind == "mlx":
+        bundled_assistant_destination = (
+            "modeles/assistant/qwen3-8b-mlx-4bit"
+        )
+        bundled_assistant_required = (
+            "config.json",
+            "model.safetensors",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "studio-audio-model.json",
+        )
+        bundled_weights = "model.safetensors"
+    else:
+        bundled_assistant_destination = (
+            "modeles/assistant/qwen3-8b-int4-ov"
+        )
+        bundled_assistant_required = (
+            "config.json",
+            "openvino_model.xml",
+            "openvino_model.bin",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "studio-audio-model.json",
+        )
+        bundled_weights = "openvino_model.bin"
+
+    missing_model_files = [
+        name
+        for name in bundled_assistant_required
+        if not (bundled_assistant_dir / name).is_file()
+    ]
+    if missing_model_files:
+        raise FileNotFoundError(
+            "Le modèle assistant à embarquer est incomplet : "
+            + ", ".join(missing_model_files)
+        )
+    if (bundled_assistant_dir / bundled_weights).stat().st_size < 4_000_000_000:
+        raise ValueError(
+            "Les poids du modèle assistant semblent tronqués : "
+            f"{bundled_assistant_dir / bundled_weights}"
+        )
+    datas.append(
+        (str(bundled_assistant_dir), bundled_assistant_destination)
+    )
+
 data_packages = (
     "gradio",
     "gradio_client",
@@ -114,9 +176,10 @@ distribution_names = (
     "av",
 )
 
-# OpenVINO/Intel Arc reste la voie Windows. Sur macOS, le moteur local repose
-# sur Faster-Whisper ; ne pas embarquer les runtimes Windows/C# inutiles réduit
-# la taille du .app et évite des imports Python.NET non disponibles.
+# OpenVINO/Intel Arc reste la voie Windows. Sur macOS, la transcription repose
+# sur Faster-Whisper et l'assistant sur MLX/Metal ; ne pas embarquer les
+# runtimes Windows/C# inutiles réduit la taille du .app et évite des imports
+# Python.NET non disponibles.
 if not is_macos:
     data_packages += (
         "openvino",
@@ -140,6 +203,37 @@ if not is_macos:
         "openvino",
         "openvino-genai",
         "openvino-tokenizers",
+    )
+else:
+    # Le raisonneur premium macOS utilise Metal via MLX. Les extensions
+    # natives et métadonnées doivent être présentes dans le véritable .app,
+    # pas seulement dans l'environnement du runner de build.
+    data_packages += (
+        "mlx",
+        "mlx_lm",
+        "transformers",
+        "tokenizers",
+        "safetensors",
+        "sentencepiece",
+    )
+    dynamic_packages += (
+        "mlx",
+        "tokenizers",
+        "safetensors",
+        "sentencepiece",
+    )
+    submodule_packages += (
+        "mlx",
+        "mlx_lm",
+    )
+    distribution_names += (
+        "mlx",
+        "mlx-lm",
+        "transformers",
+        "tokenizers",
+        "safetensors",
+        "sentencepiece",
+        "huggingface-hub",
     )
 
 for package in data_packages:
@@ -258,7 +352,7 @@ if is_macos:
             "CFBundleVersion": app_version,
             "CFBundlePackageType": "APPL",
             "NSHighResolutionCapable": True,
-            "LSMinimumSystemVersion": "12.0",
+            "LSMinimumSystemVersion": "13.0",
             "LSApplicationCategoryType": "public.app-category.productivity",
             "NSAppTransportSecurity": {"NSAllowsLocalNetworking": True},
         },

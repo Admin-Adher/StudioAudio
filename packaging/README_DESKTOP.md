@@ -33,13 +33,15 @@ Depuis PowerShell, à la racine du projet :
 Le script crée un environnement isolé `.venv-desktop`, construit une version
 PyInstaller **one-folder** et produit :
 
-- `packages\StudioAudio-Windows-x64-Portable-0.3.2.zip`
+- `packages\StudioAudio-Windows-x64-Portable-0.3.8.zip`
 - un `Setup.exe` si Inno Setup 6 est installé.
 
-Le build Windows installe et embarque aussi le runtime OpenVINO requis par le
-moteur Intel Arc recommandé. Le modèle lui-même reste préparé une seule fois
-dans le dossier de données de chaque utilisateur afin de ne pas gonfler chaque
-mise à jour du logiciel.
+Le build Windows embarque le runtime OpenVINO et **Qwen3 8B INT4** directement
+dans l'application. L'assistant est donc disponible hors ligne sans
+téléchargement au premier usage. Comme le poids OpenVINO dépasse 4,2 Go, Inno
+Setup produit un lanceur `.exe` accompagné de volumes `.bin` d'environ 1,9 Go :
+tous ces fichiers doivent rester dans le même dossier au moment de
+l'installation.
 
 Le ZIP doit être entièrement décompressé avant d'ouvrir
 `TranscriptionLocale.exe` (nom technique interne). Le format one-folder est volontaire : il démarre
@@ -58,14 +60,19 @@ Le `.app` macOS doit être compilé **sur un Mac** ; PyInstaller ne sait pas
 cross-compiler un bundle Cocoa depuis Windows.
 
 ```bash
-bash scripts/build_desktop_macos.sh 0.3.2 arm64
+bash scripts/build_desktop_macos.sh 0.3.8 arm64
 ```
 
 Le script utilise un environnement `.venv-desktop-macos-arm64`, génère le véritable
 `Studio Audio.app`, puis l'unique livrable
-`packages/StudioAudio-macOS-arm64-0.3.2.dmg`. Le workflow macOS actuel cible
+`packages/StudioAudio-macOS-arm64-0.3.8.dmg`. Le workflow macOS actuel cible
 uniquement les Mac Apple Silicon et refuse un runner ou un binaire qui ne serait
-pas strictement `arm64`.
+pas strictement `arm64`. Le DMG inclut **Qwen3 8B MLX 4-bit**, accéléré par
+Metal, et ne télécharge donc pas l'assistant lors de sa première utilisation.
+
+Pour les deux plateformes, 16 Go de mémoire vive et 15 à 20 Go d'espace libre
+sont recommandés. Le chargement du LLM reste paresseux : il n'occupe la mémoire
+qu'à la première question posée à l'assistant.
 
 Avant de publier le DMG, le workflow monte l'image disque et lance directement
 le binaire du `Studio Audio.app` qu'elle contient avec `--smoke-test`. La livraison
@@ -77,7 +84,7 @@ Pour signer et notariser la livraison :
 ```bash
 export APPLE_SIGNING_IDENTITY="Developer ID Application: Organisation (TEAMID)"
 export APPLE_NOTARY_PROFILE="transcription-locale"
-bash scripts/build_desktop_macos.sh 0.3.2 arm64
+bash scripts/build_desktop_macos.sh 0.3.8 arm64
 ```
 
 Sans Developer ID/notarisation, Gatekeeper peut afficher un avertissement aux

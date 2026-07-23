@@ -21,6 +21,8 @@ from .runtime_paths import APP_DATA_ROOT
 ROOT_DIR = APP_DATA_ROOT
 OPENVINO_BACKEND_ID = "openvino-arc-pilot"
 OPENVINO_MODEL_ID = "openvino/whisper-large-v3-turbo-int8-ov"
+OPENVINO_MODEL_REPOSITORY = "OpenVINO/whisper-large-v3-turbo-int8-ov"
+OPENVINO_MODEL_REVISION = "4929ae83ea2d1df59f4b5898a9aab8aa1c29e711"
 OPENVINO_MODEL_ENV = "TRANSCRIPTION_OPENVINO_MODEL_DIR"
 DEFAULT_OPENVINO_MODEL_DIR = (
     ROOT_DIR / "modeles" / "openvino" / "whisper-large-v3-turbo-int8-ov"
@@ -28,7 +30,11 @@ DEFAULT_OPENVINO_MODEL_DIR = (
 REQUIRED_MODEL_FILES = (
     "generation_config.json",
     "openvino_encoder_model.xml",
+    "openvino_encoder_model.bin",
     "openvino_decoder_model.xml",
+    "openvino_decoder_model.bin",
+    "openvino_tokenizer.xml",
+    "openvino_detokenizer.xml",
 )
 
 
@@ -176,6 +182,18 @@ def get_openvino_status(
             device_name=None,
             model_path=resolved_model,
         )
+
+
+def openvino_gpu_runtime_available(*, device: str = "GPU") -> bool:
+    """Vérifie le runtime GPU sans exiger que le modèle soit déjà téléchargé."""
+    try:
+        openvino, _ = _import_openvino_modules()
+        return any(
+            str(value) == device or str(value).startswith(f"{device}.")
+            for value in openvino.Core().available_devices
+        )
+    except Exception:
+        return False
 
 
 def reset_openvino_pipeline() -> None:
@@ -342,6 +360,8 @@ __all__ = [
     "DEFAULT_OPENVINO_MODEL_DIR",
     "OPENVINO_BACKEND_ID",
     "OPENVINO_MODEL_ID",
+    "OPENVINO_MODEL_REPOSITORY",
+    "OPENVINO_MODEL_REVISION",
     "OpenVINOBackendError",
     "OpenVINOBackendUnavailable",
     "OpenVINOInvalidOutput",
@@ -349,6 +369,7 @@ __all__ = [
     "OpenVINOTranscription",
     "OpenVINOWord",
     "get_openvino_status",
+    "openvino_gpu_runtime_available",
     "reset_openvino_pipeline",
     "resolve_openvino_model_path",
     "transcribe_openvino",

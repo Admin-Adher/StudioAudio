@@ -43,6 +43,37 @@ class WorkspacePersistenceTests(unittest.TestCase):
         self.assertEqual(migrated["order"], ["done", "waiting"])
         self.assertEqual(migrated["queue_order"], ["waiting"])
 
+    def test_processing_clock_anchor_preserves_an_explicit_zero_base(self) -> None:
+        migrated = workspace.normalise_workspace(
+            {
+                "order": ["running", "legacy"],
+                "items": {
+                    "running": {
+                        "name": "En cours.wav",
+                        "status": "En cours",
+                        "processing_seconds": 42.0,
+                        "processing_base_seconds": 0.0,
+                        "processing_started_at": "2026-07-23T10:00:00.000+00:00",
+                    },
+                    "legacy": {
+                        "name": "Ancien.wav",
+                        "status": "À reprendre",
+                        "processing_seconds": 17.5,
+                    },
+                },
+            }
+        )
+
+        running = migrated["items"]["running"]
+        legacy = migrated["items"]["legacy"]
+        self.assertEqual(running["processing_base_seconds"], 0.0)
+        self.assertEqual(
+            running["processing_started_at"],
+            "2026-07-23T10:00:00.000+00:00",
+        )
+        self.assertEqual(legacy["processing_base_seconds"], 17.5)
+        self.assertEqual(legacy["processing_started_at"], "")
+
     @patch("transcription_locale.core.sys.platform", "win32")
     def test_engine_preference_is_persisted_and_unknown_values_use_the_default(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

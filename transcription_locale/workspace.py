@@ -618,6 +618,13 @@ def _normalise_item(item_id: str, raw: object) -> dict[str, Any] | None:
             normalised_comments.append(comment)
     # La normalisation est additive : elle ne retire pas les champs introduits
     # par de futures versions ou par un module optionnel.
+    processing_seconds = max(0.0, float(raw.get("processing_seconds") or 0.0))
+    raw_processing_base = raw.get("processing_base_seconds")
+    processing_base_seconds = (
+        processing_seconds
+        if raw_processing_base is None
+        else max(0.0, float(raw_processing_base or 0.0))
+    )
     item = dict(raw)
     item.update({
         "id": item_id,
@@ -628,11 +635,15 @@ def _normalise_item(item_id: str, raw: object) -> dict[str, Any] | None:
         "status": status,
         "progress": float(raw.get("progress") or (1.0 if status == "Terminé" else 0.0)),
         "processing_time": str(raw.get("processing_time") or "—"),
-        "processing_seconds": float(raw.get("processing_seconds") or 0.0),
+        "processing_seconds": processing_seconds,
+        "processing_base_seconds": processing_base_seconds,
+        "processing_started_at": str(raw.get("processing_started_at") or ""),
         "partial": str(raw.get("partial") or ""),
         "stage": str(raw.get("stage") or ""),
         "settings": dict(raw.get("settings")) if isinstance(raw.get("settings"), dict) else {},
         "run_id": str(raw.get("run_id") or ""),
+        "owner_pid": int(raw.get("owner_pid") or 0),
+        "owner_session": str(raw.get("owner_session") or ""),
         "checkpoint_position": float(raw.get("checkpoint_position") or 0.0),
         "resume_count": int(raw.get("resume_count") or 0),
         "heartbeat": str(raw.get("heartbeat") or ""),

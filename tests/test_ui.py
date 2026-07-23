@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import tempfile
 import unittest
@@ -11,8 +12,11 @@ import gradio as gr
 
 from transcription_locale.core import TranscriptTurn, TranscriptionResult
 from transcription_locale.ui import (
+    DESKTOP_VISIBILITY_SYNC_JS,
     LIBRARY_SORTS,
     OPENVINO_PILOT_ENGINE,
+    PROCESSING_CLOCK_JS,
+    _assistant_empty_html,
     _assistant_history_html,
     _assistant_result_html,
     _assistant_role_proposal,
@@ -22,6 +26,7 @@ from transcription_locale.ui import (
     _engine_choices,
     _engine_settings_copy,
     _engine_status_html,
+    _fiche_header_html,
     _item_transcript,
     _role_summary_html,
     _role_voice_excerpt_html,
@@ -110,9 +115,202 @@ class StreamingUiTests(unittest.TestCase):
         ):
             outputs = poll_workspace_ui("audio-1", LIBRARY_SORTS[0])
 
-        self.assertEqual(len(outputs), 21)
+        self.assertEqual(len(outputs), 28)
         self.assertEqual(outputs[5], "Texte durable déjà reconnu.")
         self.assertIn("42 s", outputs[13])
+
+    def test_poll_never_recovers_jobs_during_periodic_refresh(self) -> None:
+        state = self._discussion_state("audio-1")
+        with (
+            patch("transcription_locale.ui.load_workspace", return_value=state),
+            patch(
+                "transcription_locale.ui.JOB_MANAGER.recover_orphaned"
+            ) as recover_orphaned,
+        ):
+            poll_workspace_ui("audio-1", LIBRARY_SORTS[0])
+
+        recover_orphaned.assert_not_called()
+
+    def test_running_fiche_refreshes_after_returning_to_the_desktop_app(self) -> None:
+        header = _fiche_header_html(
+            {
+                "id": "audio-1",
+                "name": "Entretien.wav",
+                "status": "En cours",
+                "progress": 0.57,
+            }
+        )
+
+        self.assertIn('data-audio-status="En cours"', header)
+        self.assertIn("visibilitychange", DESKTOP_VISIBILITY_SYNC_JS)
+        self.assertIn("window.location.reload()", DESKTOP_VISIBILITY_SYNC_JS)
+
+    def test_running_fiche_exposes_a_client_side_processing_clock(self) -> None:
+        header = _fiche_header_html(
+            {
+                "id": "audio-1",
+                "name": "Entretien.wav",
+                "status": "En cours",
+                "progress": 0.02,
+                "processing_time": "0 s",
+                "processing_seconds": 125.0,
+                "processing_base_seconds": 120.0,
+                "processing_started_at": "2026-07-23T10:00:00.000+00:00",
+            }
+        )
+
+        self.assertIn("class=\"fiche-processing-time\"", header)
+        self.assertIn("data-processing-live='true'", header)
+        self.assertIn("data-processing-seconds='125.000'", header)
+        self.assertIn("data-processing-base-seconds='120.000'", header)
+        self.assertIn(
+            "data-processing-started-at='2026-07-23T10:00:00.000+00:00'",
+            header,
+        )
+        self.assertIn(">2 min 05 s</strong> traitement", header)
+        self.assertIn("Date.now() - startedAt", PROCESSING_CLOCK_JS)
+        self.assertIn("window.setInterval(refresh, 1000)", PROCESSING_CLOCK_JS)
+        self.assertNotIn("window.location.reload()", PROCESSING_CLOCK_JS)
+
+    def test_completed_fiche_has_a_frozen_processing_clock(self) -> None:
+        header = _fiche_header_html(
+            {
+                "id": "audio-1",
+                "name": "Entretien.wav",
+                "status": "Terminé",
+                "progress": 1.0,
+                "processing_seconds": 125.0,
+                "processing_base_seconds": 120.0,
+                "processing_started_at": "2026-07-23T10:00:00.000+00:00",
+            }
+        )
+
+        self.assertNotIn("data-processing-live='true'", header)
+        self.assertIn(">2 min 05 s</strong> traitement", header)
+
+    def test_poll_does_not_rerender_the_workspace_for_heartbeat_updates(self) -> None:
+        state = {
+            "order": ["audio-1"],
+            "items": {
+                "audio-1": {
+                    "id": "audio-1",
+                    "path": "C:/managed/audio.wav",
+                    "name": "Entretien.wav",
+                    "status": "En cours",
+                    "progress": 0.42,
+                    "processing_seconds": 42.0,
+                    "partial": "Texte déjà reconnu.",
+                    "checkpoint_position": 42.0,
+                    "stage": "Transcription de l'audio…",
+                    "heartbeat": "2026-07-23T10:00:00+00:00",
+                    "updated_at": "2026-07-23T10:00:00+00:00",
+                    "comments": [],
+                }
+            },
+        }
+        refreshed_state = copy.deepcopy(state)
+        refreshed_item = refreshed_state["items"]["audio-1"]
+        refreshed_item.update(
+            {
+                "progress": 0.43,
+                "processing_seconds": 43.0,
+                "checkpoint_position": 43.0,
+                "heartbeat": "2026-07-23T10:00:01+00:00",
+                "updated_at": "2026-07-23T10:00:01+00:00",
+            }
+        )
+        with (
+            patch(
+                "transcription_locale.ui.load_workspace",
+                side_effect=[state, refreshed_state],
+            ),
+            patch("transcription_locale.ui.JOB_MANAGER.recover_orphaned", return_value=[]),
+            patch(
+                "transcription_locale.ui.JOB_MANAGER.active_item_ids",
+                return_value={"audio-1"},
+            ),
+        ):
+            first_outputs = poll_workspace_ui("audio-1", LIBRARY_SORTS[0])
+            refreshed_outputs = poll_workspace_ui(
+                "audio-1",
+                LIBRARY_SORTS[0],
+                first_outputs[0],
+            )
+
+        self.assertEqual(refreshed_outputs[1], gr.skip())
+        self.assertNotEqual(refreshed_outputs[4], gr.skip())
+        self.assertEqual(refreshed_outputs[5], gr.skip())
+        self.assertEqual(refreshed_outputs[6], gr.skip())
+        self.assertEqual(refreshed_outputs[7], gr.skip())
+        self.assertEqual(refreshed_outputs[12], gr.skip())
+        self.assertNotEqual(refreshed_outputs[13], gr.skip())
+
+    def test_poll_propagates_structural_workspace_changes(self) -> None:
+        state = self._discussion_state("audio-1")
+        with (
+            patch("transcription_locale.ui.load_workspace", return_value=state),
+            patch("transcription_locale.ui.JOB_MANAGER.recover_orphaned", return_value=[]),
+            patch(
+                "transcription_locale.ui.JOB_MANAGER.active_item_ids",
+                return_value=set(),
+            ),
+        ):
+            first_outputs = poll_workspace_ui("audio-1", LIBRARY_SORTS[0])
+
+        updated_state = copy.deepcopy(state)
+        updated_state["items"]["audio-1"]["name"] = "Entretien renommé.wav"
+        with (
+            patch("transcription_locale.ui.load_workspace", return_value=updated_state),
+            patch("transcription_locale.ui.JOB_MANAGER.recover_orphaned", return_value=[]),
+            patch(
+                "transcription_locale.ui.JOB_MANAGER.active_item_ids",
+                return_value=set(),
+            ),
+        ):
+            refreshed_outputs = poll_workspace_ui(
+                "audio-1",
+                LIBRARY_SORTS[0],
+                first_outputs[0],
+            )
+
+        self.assertEqual(refreshed_outputs[1], updated_state)
+        self.assertIn("Entretien renommé.wav", refreshed_outputs[4])
+
+    def test_poll_hydrates_roles_and_assistant_when_transcription_finishes(self) -> None:
+        running_state = self._discussion_state("audio-1")
+        running_item = running_state["items"]["audio-1"]
+        running_item.update(
+            {
+                "status": "En cours",
+                "progress": 0.65,
+                "partial": "Texte en cours.",
+                "result": None,
+            }
+        )
+        completed_state = self._discussion_state("audio-1")
+
+        with patch(
+            "transcription_locale.ui.load_workspace",
+            side_effect=[running_state, completed_state],
+        ):
+            first_outputs = poll_workspace_ui("audio-1", LIBRARY_SORTS[0])
+            completed_outputs = poll_workspace_ui(
+                "audio-1",
+                LIBRARY_SORTS[0],
+                first_outputs[0],
+            )
+
+        self.assertEqual(len(completed_outputs), 28)
+        self.assertNotIn("Attribution en préparation", completed_outputs[21])
+        self.assertIn("Modifier l'attribution", completed_outputs[21])
+        self.assertTrue(completed_outputs[22].interactive)
+        self.assertTrue(completed_outputs[23].interactive)
+        self.assertNotIn(
+            "Analyse disponible après la transcription",
+            completed_outputs[26],
+        )
+        self.assertIn("Interrogez la consultation", completed_outputs[26])
+        self.assertTrue(completed_outputs[27].interactive)
 
     @patch("transcription_locale.core.sys.platform", "win32")
     def test_empty_optional_vocabulary_and_partial_stream(self) -> None:
@@ -981,6 +1179,119 @@ class StreamingUiTests(unittest.TestCase):
         self.assertIn("Lecture prudente", rendered)
         self.assertIn("assistant-answer-head", rendered)
 
+    def test_assistant_summary_has_its_own_grounded_presentation(self) -> None:
+        result = {
+            "intent": "open_summary",
+            "verdict": "Synthèse",
+            "answer": (
+                "La consultation porte principalement sur l'avenir sentimental "
+                "de la Cliente avec OrionX."
+            ),
+            "key_points": [
+                {
+                    "text": "La Cliente demande comment leur relation va évoluer.",
+                    "citation_ids": ["turn-00001"],
+                },
+                "Le Master évoque ensuite un rapprochement possible.",
+            ],
+            "nuance": (
+                "Cette synthèse décrit ce qui a été dit dans l'audio, "
+                "pas ce qui se produira."
+            ),
+            "backend": "déterministe-local",
+            "coverage": {
+                "turns_analyzed": 18,
+                "duration_seconds": 420.0,
+                "role_mapping_confirmed": True,
+            },
+            "citations": [
+                {
+                    "quote": "Je voudrais savoir comment notre relation va évoluer.",
+                    "start_seconds": 24.0,
+                    "end_seconds": 35.0,
+                    "speaker_id": "SPEAKER_01",
+                    "role": "Client",
+                }
+            ],
+        }
+
+        rendered = _assistant_result_html(result)
+
+        self.assertIn("verdict-summary", rendered)
+        self.assertIn(">Synthèse<", rendered)
+        self.assertIn("Synthèse locale · Sources citées", rendered)
+        self.assertIn("Synthèse de la consultation", rendered)
+        self.assertIn("Points clés", rendered)
+        self.assertIn("Portée de la synthèse", rendered)
+        self.assertIn("Passages sources · 1", rendered)
+        self.assertIn('aria-label="Résultat de la synthèse"', rendered)
+        self.assertIn("La Cliente demande comment leur relation va évoluer.", rendered)
+        self.assertNotIn("Passage contraire explicite", rendered)
+        self.assertNotIn("Réponse détaillée", rendered)
+
+    def test_assistant_topic_statuses_are_not_binary_verdicts(self) -> None:
+        cases = (
+            ("Thème principal", "theme-primary", "Thème central"),
+            ("Thème présent", "theme-present", "Présence confirmée"),
+            ("Mention ponctuelle", "mention", "Présence limitée"),
+        )
+        for verdict, css_class, meta in cases:
+            with self.subTest(verdict=verdict):
+                rendered = _assistant_result_html(
+                    {
+                        "intent": "topic_presence",
+                        "verdict": verdict,
+                        "answer": "Oui, ce thème est abordé dans la consultation.",
+                        "analysis_points": ["Un passage explicite a été retrouvé."],
+                        "nuance": "Le niveau indique sa place dans la consultation.",
+                        "coverage": {
+                            "turns_analyzed": 12,
+                            "duration_seconds": 180.0,
+                            "role_mapping_confirmed": True,
+                        },
+                        "citations": [],
+                    }
+                )
+
+                self.assertIn(f"verdict-{css_class}", rendered)
+                self.assertIn(f">{verdict}<", rendered)
+                self.assertIn(meta, rendered)
+                self.assertIn("Réponse thématique", rendered)
+                self.assertIn("Lecture du thème", rendered)
+                self.assertIn("Passages sources · 0", rendered)
+                self.assertNotIn("Passage contraire explicite", rendered)
+
+    def test_assistant_legacy_verification_labels_remain_unchanged(self) -> None:
+        rendered = _assistant_result_html(
+            {
+                "verdict": "Confirmé",
+                "answer": "L'affirmation est présente dans l'audio.",
+                "confidence": 0.91,
+                "coverage": {
+                    "turns_analyzed": 2,
+                    "duration_seconds": 8.0,
+                    "role_mapping_confirmed": True,
+                },
+                "citations": [],
+            }
+        )
+
+        self.assertIn("verdict-confirmed", rendered)
+        self.assertIn("Appuyé par l&#x27;audio", rendered)
+        self.assertIn("Réponse détaillée", rendered)
+        self.assertIn("Passages retenus · 0", rendered)
+        self.assertNotIn("Synthèse de la consultation", rendered)
+
+    def test_assistant_empty_state_invites_all_supported_question_types(self) -> None:
+        item = {"result": {"turns": [{"text": "Un passage.", "start": 0, "end": 1}]}}
+
+        rendered = _assistant_empty_html(item)
+
+        self.assertIn("Interrogez la consultation", rendered)
+        self.assertIn("Demandez une synthèse", rendered)
+        self.assertIn("Est-ce que ça parle d'amour ?", rendered)
+        self.assertIn("Le Master a-t-il annoncé un retour ?", rendered)
+
     def test_assistant_history_restores_answer_passages_roles_and_timecodes(self) -> None:
         item = {
             "assistant_queries": [
@@ -1031,6 +1342,54 @@ class StreamingUiTests(unittest.TestCase):
         self.assertNotIn('aria-live="polite"', rendered)
         self.assertNotIn("assistant-answer-head", rendered)
         self.assertEqual(rendered.count("verdict-chip"), 1)
+
+    def test_assistant_history_preserves_summary_and_topic_labels(self) -> None:
+        item = {
+            "assistant_queries": [
+                {
+                    "id": "summary",
+                    "question": "De quoi parle principalement la consultation ?",
+                    "created_at": "2026-07-23T15:48:00+02:00",
+                    "result": {
+                        "intent": "open_summary",
+                        "verdict": "Synthèse",
+                        "answer": "La consultation porte sur une relation sentimentale.",
+                        "coverage": {
+                            "turns_analyzed": 64,
+                            "duration_seconds": 1107.0,
+                            "role_mapping_confirmed": True,
+                        },
+                        "citations": [],
+                    },
+                },
+                {
+                    "id": "topic",
+                    "question": "Est-ce que ça parle d'amour ?",
+                    "created_at": "2026-07-23T15:49:00+02:00",
+                    "result": {
+                        "intent": "topic_presence",
+                        "verdict": "Thème principal",
+                        "answer": "Oui, l'amour est le thème principal.",
+                        "coverage": {
+                            "turns_analyzed": 64,
+                            "duration_seconds": 1107.0,
+                            "role_mapping_confirmed": True,
+                        },
+                        "citations": [],
+                    },
+                },
+            ]
+        }
+
+        rendered = _assistant_history_html(item, include_latest=True)
+
+        self.assertIn("De quoi parle principalement la consultation ?", rendered)
+        self.assertIn("Est-ce que ça parle d&#x27;amour ?", rendered)
+        self.assertIn(">Synthèse<", rendered)
+        self.assertIn(">Thème principal<", rendered)
+        self.assertIn("Synthèse locale · Sources citées", rendered)
+        self.assertIn("Analyse thématique locale · Thème central", rendered)
+        self.assertNotIn("Passage contraire explicite", rendered)
 
     def test_assistant_history_excludes_current_result_and_escapes_saved_content(self) -> None:
         item = {

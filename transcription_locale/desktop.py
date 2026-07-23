@@ -28,6 +28,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .assistant_smoke import (
+    ASSISTANT_SMOKE_TEST_FLAG,
+    run_assistant_smoke_test,
+)
 from .runtime_paths import APP_DATA_ROOT, RESOURCE_ROOT
 
 
@@ -506,6 +510,9 @@ def main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     directories = configure_desktop_environment()
     log_path = configure_logging(directories["logs"])
+    if ASSISTANT_SMOKE_TEST_FLAG in arguments:
+        logging.info("Démarrage du smoke test assistant de %s", WINDOW_TITLE)
+        return run_assistant_smoke_test(directories, log_path)
     if SMOKE_TEST_FLAG in arguments:
         logging.info("Démarrage du smoke test de %s", WINDOW_TITLE)
         return run_desktop_smoke_test(directories, log_path)
@@ -560,6 +567,7 @@ __all__ = [
     "APP_TITLE",
     "AlreadyRunningError",
     "AppInstanceLock",
+    "ASSISTANT_SMOKE_TEST_FLAG",
     "DesktopController",
     "DesktopSmokeError",
     "SMOKE_IMPORTS",
@@ -567,6 +575,7 @@ __all__ = [
     "configure_desktop_environment",
     "find_available_port",
     "main",
+    "run_assistant_smoke_test",
     "run_desktop_smoke_test",
     "validate_desktop_runtime",
     "wait_for_loopback_server",

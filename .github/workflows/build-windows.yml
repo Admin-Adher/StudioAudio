@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version numérique du logiciel (ex. 0.3.2)"
+        description: "Version numérique du logiciel (ex. 0.3.8)"
         required: true
-        default: "0.3.2"
+        default: "0.3.8"
         type: string
   push:
     tags:
@@ -23,7 +23,7 @@ jobs:
   build:
     name: Windows x64
     runs-on: windows-2025
-    timeout-minutes: 150
+    timeout-minutes: 240
 
     steps:
       - name: Télécharger le projet
@@ -66,8 +66,24 @@ jobs:
           if (-not (Test-Path -LiteralPath $setup)) {
             throw "Le Setup Windows attendu est absent : $setup"
           }
+          $volumes = @(
+            Get-ChildItem -LiteralPath (Join-Path $PWD "packages") `
+              -File -Filter "StudioAudio-Windows-x64-Setup-$version-*.bin"
+          )
+          if ($volumes.Count -eq 0) {
+            throw "Les volumes .bin du Setup hors ligne sont absents."
+          }
+          $weights = Join-Path $PWD (
+            "output\desktop\windows\dist\TranscriptionLocale\_internal\" +
+            "modeles\assistant\qwen3-8b-int4-ov\openvino_model.bin"
+          )
+          if (-not (Test-Path -LiteralPath $weights) -or
+              (Get-Item -LiteralPath $weights).Length -lt 4GB) {
+            throw "Le modèle Qwen3 OpenVINO complet n'est pas embarqué."
+          }
           "version=$version" >> $env:GITHUB_OUTPUT
           "setup=$setup" >> $env:GITHUB_OUTPUT
+          "volume_count=$($volumes.Count)" >> $env:GITHUB_OUTPUT
 
       - name: Installer silencieusement le véritable Setup
         id: install
@@ -102,6 +118,32 @@ jobs:
           $installedExecutable = Join-Path $installDirectory "TranscriptionLocale.exe"
           if (-not (Test-Path -LiteralPath $installedExecutable)) {
             throw "L'exécutable installé est absent : $installedExecutable"
+          }
+          $installedModel = Join-Path $installDirectory (
+            "_internal\modeles\assistant\qwen3-8b-int4-ov"
+          )
+          $requiredModelFiles = @(
+            "config.json",
+            "openvino_model.xml",
+            "openvino_model.bin",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "studio-audio-model.json"
+          )
+          foreach ($name in $requiredModelFiles) {
+            $path = Join-Path $installedModel $name
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Ressource Qwen3 absente du logiciel installé : $path"
+            }
+          }
+          if ((Get-Item -LiteralPath (Join-Path $installedModel "openvino_model.bin")).Length -lt 4GB) {
+            throw "Les poids Qwen3 installés sont tronqués."
+          }
+          $manifest = Get-Content `
+            -LiteralPath (Join-Path $installedModel "studio-audio-model.json") `
+            -Raw | ConvertFrom-Json
+          if ($manifest.revision -ne "5c47abf4b8e12ebe8e99745bb0c1ec17e0c0abcc") {
+            throw "La révision Qwen3 installée n'est pas celle validée."
           }
           "directory=$installDirectory" >> $env:GITHUB_OUTPUT
           "executable=$installedExecutable" >> $env:GITHUB_OUTPUT
@@ -187,7 +229,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: StudioAudio-Windows-x64
-          path: ${{ steps.package.outputs.setup }}
+          path: packages/StudioAudio-Windows-x64-Setup-${{ steps.package.outputs.version }}*
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
@@ -198,7 +240,8 @@ jobs:
           @"
           ### Studio Audio Windows x64
 
-          Le livrable publié est le **lanceur Setup.exe** prêt à transmettre.
+          Le livrable publié contient le **lanceur Setup.exe** et ses **${{ steps.package.outputs.volume_count }} volume(s) .bin**.
+          Tous ces fichiers doivent rester ensemble dans le même dossier ; le Setup est entièrement hors ligne et inclut Qwen3 8B INT4.
           Le véritable Setup a été installé silencieusement dans un dossier vierge, puis son exécutable installé a passé le smoke test local complet.
-          Le contrôle valide les ressources embarquées, le serveur local, son arrêt propre et l'absence de processus résiduel.
+          Le contrôle valide les poids OpenVINO épinglés, les ressources embarquées, le serveur local, son arrêt propre et l'absence de processus résiduel.
           "@ >> $env:GITHUB_STEP_SUMMARY

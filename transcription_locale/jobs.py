@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import threading
 import time
 import uuid
 from collections import deque
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Iterable
 
+from .assistant_engine import release_default_reasoners
 from .core import (
     FASTER_WHISPER_BACKEND,
     PROFILE_CONFIG,
@@ -31,8 +33,17 @@ from .workspace import (
 )
 
 
+_PROCESS_SESSION_ID = uuid.uuid4().hex
+
+
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def _processing_anchor_now() -> str:
+    """Horodatage mural de l'ancre UI, distinct du chrono monotone du worker."""
+
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
 def _engine_version(engine: str = "faster-whisper") -> str:
@@ -176,6 +187,7 @@ class TranscriptionJobManager:
                     item["settings"] = settings_data
                     if item.get("status") not in {"En cours", "À reprendre"}:
                         item["status"] = "En attente"
+                        item["processing_started_at"] = ""
                     item["error"] = ""
                     item["updated_at"] = _now()
                     if item_id not in queue_order:
@@ -201,10 +213,20 @@ class TranscriptionJobManager:
         waiting_for_settings: list[str] = []
         for item_id in order:
             item = items.get(item_id) if isinstance(items, dict) else None
+            try:
+                owner_pid = int(item.get("owner_pid") or 0) if isinstance(item, dict) else 0
+            except (TypeError, ValueError):
+                owner_pid = 0
+            owned_by_current_process = (
+                isinstance(item, dict)
+                and owner_pid == os.getpid()
+                and str(item.get("owner_session") or "") == _PROCESS_SESSION_ID
+            )
             if (
                 not isinstance(item, dict)
                 or item.get("status") != "En cours"
                 or item_id in active
+                or owned_by_current_process
             ):
                 continue
             settings = JobSettings.from_dict(item.get("settings"))
@@ -225,6 +247,13 @@ class TranscriptionJobManager:
                         continue
                     item["status"] = "À reprendre"
                     item["stage"] = "Traitement interrompu — reprise disponible"
+                    item["owner_pid"] = 0
+                    item["owner_session"] = ""
+                    item["processing_base_seconds"] = max(
+                        0.0,
+                        float(item.get("processing_seconds") or 0.0),
+                    )
+                    item["processing_started_at"] = ""
                     item["updated_at"] = _now()
 
             mutate_workspace(mark)
@@ -278,6 +307,7 @@ class TranscriptionJobManager:
                         item_id,
                         status="Échec",
                         stage="Échec interne du gestionnaire de tâches",
+                        processing_started_at="",
                         error=f"{type(exc).__name__}: {exc}",
                         heartbeat=_now(),
                     )
@@ -302,9 +332,16 @@ class TranscriptionJobManager:
                 item_id,
                 status="Échec",
                 stage="Fichier audio introuvable",
+                processing_started_at="",
                 error=f"Fichier audio introuvable : {source}",
             )
             return
+
+        # Qwen3 et Whisper peuvent chacun occuper plusieurs gigaoctets de
+        # mémoire GPU/unifiée. Une nouvelle transcription rend donc le
+        # raisonneur conversationnel paresseux avant de charger l'ASR ; il sera
+        # recréé automatiquement à la prochaine question de l'utilisateur.
+        release_default_reasoners()
 
         display_name = str(item.get("name") or source.name)
         base_elapsed = max(0.0, float(item.get("processing_seconds") or 0.0))
@@ -321,6 +358,7 @@ class TranscriptionJobManager:
         resumed = bool(saved_checkpoint)
         resume_count = int(item.get("resume_count") or 0) + (1 if resumed else 0)
         started_at = time.monotonic()
+        processing_started_at = _processing_anchor_now()
         initial_progress = (
             float(item.get("progress") or 0.0) if saved_checkpoint else 0.0
         )
@@ -340,7 +378,13 @@ class TranscriptionJobManager:
                 else 0.0
             ),
             resume_count=resume_count,
+            processing_seconds=base_elapsed,
+            processing_time=format_duration(base_elapsed),
+            processing_base_seconds=base_elapsed,
+            processing_started_at=processing_started_at,
             heartbeat=_now(),
+            owner_pid=os.getpid(),
+            owner_session=_PROCESS_SESSION_ID,
             settings=settings.to_dict(),
             error="",
         )
@@ -359,12 +403,13 @@ class TranscriptionJobManager:
                     max(0.0, min(1.0, float(value))),
                 )
                 current_progress = last_reported_progress
+            current_elapsed = elapsed()
             update_workspace_item(
                 item_id,
                 status="En cours",
                 progress=current_progress,
-                processing_seconds=elapsed(),
-                processing_time=format_duration(elapsed()),
+                processing_seconds=current_elapsed,
+                processing_time=format_duration(current_elapsed),
                 stage=str(message),
                 heartbeat=_now(),
             )
@@ -388,14 +433,15 @@ class TranscriptionJobManager:
             )
             save_checkpoint(item_id, durable)
             position = float(durable.get("committed_until_seconds") or 0.0)
+            current_elapsed = elapsed()
             update_workspace_item(
                 item_id,
                 status="En cours",
                 partial=str(durable.get("partial") or ""),
                 checkpoint_position=position,
                 stage=str(durable.get("stage") or "Transcription"),
-                processing_seconds=elapsed(),
-                processing_time=format_duration(elapsed()),
+                processing_seconds=current_elapsed,
+                processing_time=format_duration(current_elapsed),
                 heartbeat=_now(),
             )
 
@@ -423,17 +469,22 @@ class TranscriptionJobManager:
                 progress=1.0,
                 processing_seconds=result.processing_seconds,
                 processing_time=format_duration(result.processing_seconds),
+                processing_base_seconds=result.processing_seconds,
+                processing_started_at="",
                 partial=plain_transcript(result.turns),
                 checkpoint_position=result.duration,
                 stage="Transcription terminée",
                 result=result.to_dict(),
                 files=[str(path) for path in files],
                 heartbeat=_now(),
+                owner_pid=0,
+                owner_session="",
                 error="",
             )
             delete_checkpoint(item_id)
         except Exception as exc:
             detail = f"{type(exc).__name__}: {exc}"
+            current_elapsed = elapsed()
             update_workspace_item(
                 item_id,
                 status="Échec",
@@ -442,9 +493,13 @@ class TranscriptionJobManager:
                     if load_checkpoint(item_id)
                     else "Échec du traitement"
                 ),
-                processing_seconds=elapsed(),
-                processing_time=format_duration(elapsed()),
+                processing_seconds=current_elapsed,
+                processing_time=format_duration(current_elapsed),
+                processing_base_seconds=current_elapsed,
+                processing_started_at="",
                 heartbeat=_now(),
+                owner_pid=0,
+                owner_session="",
                 error=detail,
             )
 

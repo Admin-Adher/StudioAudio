@@ -4,13 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version numérique du logiciel (ex. 0.3.2)"
+        description: "Version numérique du logiciel (ex. 0.3.8)"
         required: true
-        default: "0.3.2"
+        default: "0.3.8"
         type: string
   push:
     tags:
       - "v*.*.*"
+      - "macos-v*.*.*"
 
 permissions:
   contents: read
@@ -23,7 +24,7 @@ jobs:
   build:
     name: macOS Apple Silicon (arm64)
     runs-on: macos-15
-    timeout-minutes: 120
+    timeout-minutes: 240
 
     steps:
       - name: Télécharger le projet
@@ -55,16 +56,18 @@ jobs:
           MACOS_PYTHON: python3.12
         run: |
           set -euo pipefail
-          VERSION="${RELEASE_VERSION#v}"
+          VERSION="${RELEASE_VERSION#macos-v}"
+          VERSION="${VERSION#v}"
           bash scripts/build_desktop_macos.sh "$VERSION" arm64
 
       - name: Tester le véritable Studio Audio.app du DMG
         id: smoke
         shell: bash
-        timeout-minutes: 8
+        timeout-minutes: 18
         env:
           DMG_PATH: ${{ steps.package.outputs.dmg }}
           SMOKE_TIMEOUT_SECONDS: "240"
+          ASSISTANT_SMOKE_TIMEOUT_SECONDS: "600"
         run: |
           set -euo pipefail
           : "${DMG_PATH:?Le build ne fournit pas le chemin du DMG}"
@@ -97,16 +100,60 @@ jobs:
 
           export STUDIO_AUDIO_APP="$MOUNT_POINT/Studio Audio.app"
           export STUDIO_AUDIO_EXECUTABLE="$STUDIO_AUDIO_APP/Contents/MacOS/TranscriptionLocale"
+          export STUDIO_AUDIO_ASSISTANT_MODEL="$STUDIO_AUDIO_APP/Contents/Frameworks/modeles/assistant/qwen3-8b-mlx-4bit"
           export STUDIO_AUDIO_SMOKE_DATA="$SMOKE_DATA"
           export STUDIO_AUDIO_SMOKE_LOG="$SMOKE_LOG"
           export TRANSCRIPTION_APP_DATA_DIR="$SMOKE_DATA"
           export GRADIO_ANALYTICS_ENABLED=False
           export HF_HUB_DISABLE_TELEMETRY=1
+          export HF_HUB_OFFLINE=1
+          export TRANSFORMERS_OFFLINE=1
           export DO_NOT_TRACK=1
           export TOKENIZERS_PARALLELISM=false
 
           test -d "$STUDIO_AUDIO_APP"
           test -x "$STUDIO_AUDIO_EXECUTABLE"
+          test -d "$STUDIO_AUDIO_ASSISTANT_MODEL"
+          python3.12 <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          model_dir = Path(os.environ["STUDIO_AUDIO_ASSISTANT_MODEL"])
+          required = (
+              "config.json",
+              "model.safetensors",
+              "tokenizer.json",
+              "tokenizer_config.json",
+              "studio-audio-model.json",
+          )
+          missing = [name for name in required if not (model_dir / name).is_file()]
+          if missing:
+              raise SystemExit(
+                  "Ressources Qwen3 MLX absentes du DMG : " + ", ".join(missing)
+              )
+          expected_size = 4_607_835_174
+          expected_sha256 = (
+              "f2d29621aab300336ad645567ff38c42"
+              "aac755513006ef4e8a579cf7ef5256d8"
+          )
+          if (model_dir / "model.safetensors").stat().st_size != expected_size:
+              raise SystemExit(
+                  "La taille des poids Qwen3 MLX du DMG est incorrecte."
+              )
+          manifest = json.loads(
+              (model_dir / "studio-audio-model.json").read_text(encoding="utf-8")
+          )
+          if (
+              manifest.get("repository") != "mlx-community/Qwen3-8B-4bit"
+              or manifest.get("revision")
+              != "545dc4251c05440727734bcd94334791f6ab0192"
+              or manifest.get("runtime") != "mlx"
+              or manifest.get("weights_size") != expected_size
+              or manifest.get("weights_sha256") != expected_sha256
+          ):
+              raise SystemExit("Le DMG ne contient pas le modèle MLX épinglé.")
+          PY
           file "$STUDIO_AUDIO_EXECUTABLE" | tee "$SMOKE_LOG/executable.txt"
           EXECUTABLE_ARCHS="$(lipo -archs "$STUDIO_AUDIO_EXECUTABLE")"
           echo "$EXECUTABLE_ARCHS" | tee -a "$SMOKE_LOG/executable.txt"
@@ -258,6 +305,96 @@ jobs:
               raise SystemExit(1)
           PY
 
+          # Le serveur seul ne prouve pas que les poids MLX sont utilisables.
+          # Ce second processus charge réellement Qwen depuis le .app monté et
+          # exige une réponse JSON courte, toujours avec le réseau désactivé.
+          python3.12 <<'PY'
+          import json
+          import os
+          import shutil
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          executable = Path(os.environ["STUDIO_AUDIO_EXECUTABLE"])
+          expected_model = Path(os.environ["STUDIO_AUDIO_ASSISTANT_MODEL"]).resolve()
+          data_root = Path(os.environ["STUDIO_AUDIO_SMOKE_DATA"])
+          log_root = Path(os.environ["STUDIO_AUDIO_SMOKE_LOG"])
+          timeout = int(os.environ.get("ASSISTANT_SMOKE_TIMEOUT_SECONDS", "600"))
+          stdout_path = log_root / "assistant-smoke.stdout.log"
+          stderr_path = log_root / "assistant-smoke.stderr.log"
+          verification_path = log_root / "assistant-verification.json"
+          report_path = data_root / "logs" / "assistant-smoke.json"
+
+          try:
+              completed = subprocess.run(
+                  [str(executable), "--assistant-smoke-test"],
+                  cwd=os.environ["GITHUB_WORKSPACE"],
+                  env=os.environ.copy(),
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.PIPE,
+                  timeout=timeout,
+                  check=False,
+              )
+          except subprocess.TimeoutExpired as exc:
+              stdout_path.write_bytes(exc.stdout or b"")
+              stderr_path.write_bytes(exc.stderr or b"")
+              raise SystemExit(
+                  f"Le smoke test Qwen MLX a dépassé {timeout} secondes."
+              ) from exc
+
+          stdout_path.write_bytes(completed.stdout)
+          stderr_path.write_bytes(completed.stderr)
+          if completed.returncode != 0:
+              detail = completed.stderr.decode("utf-8", errors="replace")
+              if detail:
+                  print(detail[-12000:], file=sys.stderr)
+              raise SystemExit(
+                  "Le smoke test Qwen MLX a échoué avec le code "
+                  f"{completed.returncode}."
+              )
+          if not report_path.is_file():
+              raise SystemExit(
+                  f"Le rapport JSON du smoke test Qwen est absent : {report_path}"
+              )
+
+          report = json.loads(report_path.read_text(encoding="utf-8"))
+          failures = []
+          if report.get("mode") != "assistant-smoke":
+              failures.append(f"mode inattendu : {report.get('mode')!r}")
+          if report.get("status") != "ok":
+              failures.append(f"statut inattendu : {report.get('status')!r}")
+          if not report.get("backend"):
+              failures.append("backend absent")
+          if not report.get("device"):
+              failures.append("device absent")
+          model_value = report.get("model")
+          if not model_value:
+              failures.append("model absent")
+          elif Path(str(model_value)).resolve() != expected_model:
+              failures.append(
+                  f"mauvais modèle résolu : {model_value!r}, attendu {expected_model}"
+              )
+          response = report.get("response")
+          if not isinstance(response, dict) or response.get("ready") is not True:
+              failures.append(f"réponse Qwen invalide : {response!r}")
+
+          verification = {
+              "executable": str(executable),
+              "returncode": completed.returncode,
+              "report": report,
+              "failures": failures,
+          }
+          verification_path.write_text(
+              json.dumps(verification, ensure_ascii=False, indent=2, sort_keys=True),
+              encoding="utf-8",
+          )
+          shutil.copy2(report_path, log_root / "assistant-smoke.json")
+          print(json.dumps(verification, ensure_ascii=False, sort_keys=True))
+          if failures:
+              raise SystemExit(1)
+          PY
+
       - name: Publier les journaux si le véritable .app échoue
         if: ${{ failure() && steps.smoke.outcome == 'failure' }}
         uses: actions/upload-artifact@v7
@@ -284,7 +421,9 @@ jobs:
             echo
             echo "Le seul livrable publié est le **DMG Apple Silicon**."
             echo "Le véritable \`Studio Audio.app\` contenu dans ce DMG a été monté, lancé et validé automatiquement."
-            echo "Le test contrôle les ressources embarquées, le serveur local, sa réponse HTTP et son arrêt propre."
+            echo "Le DMG est entièrement hors ligne et inclut Qwen3 8B MLX 4-bit, épinglé et validé avant publication."
+            echo "Le test contrôle les poids MLX, les ressources embarquées, le serveur local, sa réponse HTTP et son arrêt propre."
+            echo "Il charge ensuite réellement Qwen hors ligne via MLX/Metal et valide une réponse JSON structurée."
             echo
             echo "> Ce build interne est signé ad hoc. Au premier lancement, macOS peut demander clic droit → Ouvrir."
           } >> "$GITHUB_STEP_SUMMARY"

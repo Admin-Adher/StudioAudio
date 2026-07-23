@@ -24,6 +24,10 @@ from .assistant_engine import (
     suggest_speaker_roles,
     verify_claim,
 )
+from .audio_dynamics import (
+    analyze_audio_dynamics,
+    question_needs_audio_analysis,
+)
 from .core import (
     PROFILE_CONFIG,
     TranscriptTurn,
@@ -1058,6 +1062,11 @@ html, body {
   pointer-events: none;
   transform: translate(-50%, -50%);
 }
+.delete-action-icon svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
 .delete-confirm-backdrop {
   position: fixed;
   inset: 0;
@@ -1096,7 +1105,7 @@ html, body {
   border-radius: 13px;
   background: rgba(151,71,62,.09);
 }
-.delete-confirm-icon img { width: 19px; height: 19px; }
+.delete-confirm-icon svg { width: 19px; height: 19px; }
 .delete-confirm-dialog h3 { margin: 0 0 8px; font-size: 1.17rem; }
 .delete-confirm-dialog p { margin: 0; color: var(--muted); line-height: 1.55; }
 .delete-confirm-dialog strong { color: var(--ink); }
@@ -2531,6 +2540,11 @@ html, body {
 .verdict-contradicted { color: #88473f; border-color: #dfb0aa; background: #f9e6e3; }
 .verdict-not-found { color: #625b53; border-color: #d9cec2; background: #f0e9e0; }
 .verdict-clarify { color: #664b24; border-color: #dfc18f; background: #fff4dc; }
+.verdict-summary { color: #4e5362; border-color: #bdc3d2; background: #edf0f6; }
+.verdict-answered { color: #365c49; border-color: #a9c9b8; background: #e5f2eb; }
+.verdict-theme-primary { color: #365c49; border-color: #9fc3af; background: #e1f0e8; }
+.verdict-theme-present { color: #466150; border-color: #bad0c2; background: #edf5f0; }
+.verdict-mention { color: #72501f; border-color: #e2bd7d; background: #fff0cf; }
 .assistant-confidence { color: #625b53; font-size: .72rem; font-weight: 700; }
 .assistant-result-label {
   color: #746b62;
@@ -3687,7 +3701,16 @@ DELETE_ACTION_JS = r"""
 () => {
   if (window.__transcriptionDeleteActionsInstalled) return [];
   window.__transcriptionDeleteActionsInstalled = true;
-  const iconUrl = "/gradio_api/file=assets/icons/trash-2.svg";
+  const iconMarkup = `
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
+         aria-hidden="true">
+      <path d="M3 6h18"></path>
+      <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"></path>
+      <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+      <line x1="10" x2="10" y1="11" y2="17"></line>
+      <line x1="14" x2="14" y1="11" y2="17"></line>
+    </svg>`;
   let activeAction = null;
 
   const setNativeValue = (element, value) => {
@@ -3731,7 +3754,7 @@ DELETE_ACTION_JS = r"""
   backdrop.setAttribute("role", "presentation");
   backdrop.innerHTML = `
     <section class="delete-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-confirm-title" aria-describedby="delete-confirm-copy">
-      <div class="delete-confirm-icon"><img src="${iconUrl}" alt=""></div>
+      <div class="delete-confirm-icon">${iconMarkup}</div>
       <h3 id="delete-confirm-title">Supprimer cet audio ?</h3>
       <p id="delete-confirm-copy">La fiche <strong data-delete-name></strong>, ses commentaires, ses exports et sa copie audio locale seront supprimés. Le fichier source d'origine ne sera pas touché.</p>
       <div class="delete-confirm-actions">
@@ -3789,11 +3812,10 @@ DELETE_ACTION_JS = r"""
       cell.setAttribute("title", info?.running ? "Transcription en cours" : "Supprimer cet audio");
       cell.classList.toggle("is-disabled", Boolean(info?.running));
       if (!wrap.querySelector(".delete-action-icon")) {
-        const icon = document.createElement("img");
+        const icon = document.createElement("span");
         icon.className = "delete-action-icon";
-        icon.src = iconUrl;
-        icon.alt = "";
         icon.setAttribute("aria-hidden", "true");
+        icon.innerHTML = iconMarkup;
         wrap.appendChild(icon);
       }
     });
@@ -4242,6 +4264,91 @@ WORKSPACE_NAV_JS = r"""
   restore();
   window.setTimeout(restore, 120);
   window.setTimeout(restore, 500);
+  return [];
+}
+"""
+
+
+DESKTOP_VISIBILITY_SYNC_JS = r"""
+() => {
+  if (window.__studioAudioVisibilitySyncInstalled) return [];
+  window.__studioAudioVisibilitySyncInstalled = true;
+  let hiddenAt = 0;
+
+  const rememberHidden = () => {
+    if (document.hidden && !hiddenAt) hiddenAt = Date.now();
+  };
+  const refreshStaleRunningView = () => {
+    if (document.hidden) {
+      rememberHidden();
+      return;
+    }
+    const elapsed = hiddenAt ? Date.now() - hiddenAt : 0;
+    hiddenAt = 0;
+    if (elapsed < 2000) return;
+    const running = document.querySelector(
+      ".fiche-head[data-audio-status='En cours'],"
+      + ".fiche-head[data-audio-status='À reprendre']"
+    );
+    if (running) window.location.reload();
+  };
+
+  document.addEventListener("visibilitychange", refreshStaleRunningView);
+  window.addEventListener("focus", refreshStaleRunningView);
+  rememberHidden();
+  return [];
+}
+"""
+
+
+PROCESSING_CLOCK_JS = r"""
+() => {
+  if (window.__studioAudioProcessingClockInstalled) return [];
+  window.__studioAudioProcessingClockInstalled = true;
+
+  const formatDuration = (rawSeconds) => {
+    const total = Math.max(0, Math.round(Number(rawSeconds) || 0));
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    const seconds = total % 60;
+    if (hours) {
+      return `${hours} h ${String(minutes).padStart(2, "0")} min `
+        + `${String(seconds).padStart(2, "0")} s`;
+    }
+    if (minutes) return `${minutes} min ${String(seconds).padStart(2, "0")} s`;
+    return `${seconds} s`;
+  };
+
+  const refresh = () => {
+    document.querySelectorAll(
+      ".fiche-processing-time[data-processing-live='true']"
+    ).forEach((node) => {
+      const saved = Math.max(0, Number(node.dataset.processingSeconds) || 0);
+      const base = Math.max(0, Number(node.dataset.processingBaseSeconds) || 0);
+      const startedAt = Date.parse(node.dataset.processingStartedAt || "");
+      if (!Number.isFinite(startedAt)) return;
+      const activeSeconds = base + Math.max(0, (Date.now() - startedAt) / 1000);
+      const nextText = formatDuration(Math.max(saved, activeSeconds));
+      if (node.textContent !== nextText) node.textContent = nextText;
+    });
+  };
+
+  let scheduled = false;
+  const schedule = () => {
+    if (scheduled) return;
+    scheduled = true;
+    window.requestAnimationFrame(() => {
+      scheduled = false;
+      refresh();
+    });
+  };
+
+  const observer = new MutationObserver(schedule);
+  observer.observe(document.body, { childList: true, subtree: true });
+  window.setInterval(refresh, 1000);
+  document.addEventListener("visibilitychange", schedule);
+  window.addEventListener("focus", schedule);
+  schedule();
   return [];
 }
 """
@@ -4915,8 +5022,11 @@ def _setup_details_html(active_stage: str = "") -> str:
         ("Mode Très rapide", status["base"]),
         ("Mode Équilibré", status["small"]),
         ("Mode Précis", status["turbo"]),
-        ("Séparation des voix", status["speakers"]),
     ]
+    if openvino_arc_supported():
+        items.append(("Intel Arc · pilote", status["openvino"]))
+        items.append(("Assistant Premium · Qwen3 8B", status["assistant"]))
+    items.append(("Séparation des voix", status["speakers"]))
     blocks = []
     for label, installed in items:
         if installed:
@@ -5085,6 +5195,44 @@ def _normalise_audio_paths(value: object) -> list[Path]:
 
 def _audio_key(path: Path) -> str:
     return str(path)
+
+
+def _audio_path_identity(value: str | os.PathLike[str] | Path) -> str:
+    """Construit une identité de chemin stable pour les événements du File.
+
+    Gradio peut présenter le chemin temporaire reçu lors de l'upload ou le
+    chemin de la copie gérée restaurée par le serveur. Le workspace conserve
+    les deux ; cette normalisation permet de les comparer sans dépendre de la
+    casse utilisée par Windows.
+    """
+
+    try:
+        resolved = Path(value).expanduser().resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        resolved = Path(os.path.abspath(os.fspath(value)))
+    return os.path.normcase(str(resolved))
+
+
+def _workspace_audio_id_for_path(
+    state: dict[str, object] | None,
+    path: str | os.PathLike[str] | Path,
+) -> str | None:
+    """Résout un chemin visible vers l'identifiant durable de son audio."""
+
+    identity = _audio_path_identity(path)
+    items = _workspace_items(state)
+    for item_id in _workspace_order(state):
+        item = items.get(item_id)
+        if not isinstance(item, dict):
+            continue
+        candidates = (item.get("path"), item.get("source_path"))
+        if any(
+            candidate
+            and _audio_path_identity(str(candidate)) == identity
+            for candidate in candidates
+        ):
+            return item_id
+    return None
 
 
 def _display_audio_name(path: Path, audio_names: dict[str, str] | None = None) -> str:
@@ -5952,7 +6100,28 @@ def _fiche_header_html(item: dict[str, object] | None) -> str:
     )
     result = item.get("result") if isinstance(item.get("result"), dict) else {}
     duration = format_duration(float(result.get("duration") or 0.0)) if result else "À analyser"
-    processing = html.escape(str(item.get("processing_time") or "—"))
+    processing_seconds = max(0.0, float(item.get("processing_seconds") or 0.0))
+    raw_processing_base = item.get("processing_base_seconds")
+    processing_base_seconds = (
+        processing_seconds
+        if raw_processing_base is None
+        else max(0.0, float(raw_processing_base or 0.0))
+    )
+    processing_started_at = str(item.get("processing_started_at") or "")
+    processing_clock_attributes = ""
+    if status == "En cours" and processing_started_at:
+        processing_clock_attributes = (
+            " data-processing-live='true'"
+            f" data-processing-seconds='{processing_seconds:.3f}'"
+            f" data-processing-base-seconds='{processing_base_seconds:.3f}'"
+            " data-processing-started-at='"
+            f"{html.escape(processing_started_at, quote=True)}'"
+        )
+    processing = html.escape(
+        format_duration(processing_seconds)
+        if processing_seconds > 0 or status == "En cours"
+        else str(item.get("processing_time") or "—")
+    )
     stage = html.escape(str(item.get("stage") or ""))
     checkpoint_position = max(0.0, float(item.get("checkpoint_position") or 0.0))
     resume_note = (
@@ -5961,7 +6130,7 @@ def _fiche_header_html(item: dict[str, object] | None) -> str:
         else ""
     )
     return f"""
-      <section class="fiche-head">
+      <section class="fiche-head" data-audio-status="{html.escape(status, quote=True)}">
         <div class="fiche-title-row">
           <div>
             <span class="eyebrow">Fiche audio</span>
@@ -5977,7 +6146,7 @@ def _fiche_header_html(item: dict[str, object] | None) -> str:
         <div class="fiche-live-stage"><strong>{stage or status}</strong>{resume_note}</div>
         <div class="fiche-metrics">
           <span><strong>{duration}</strong> durée</span>
-          <span><strong>{processing}</strong> traitement</span>
+          <span><strong class="fiche-processing-time"{processing_clock_attributes}>{processing}</strong> traitement</span>
           <span><strong>{len(comments)}</strong> commentaire(s)</span>
           <span><strong>{unresolved}</strong> à discuter</span>
         </div>
@@ -6550,10 +6719,190 @@ def _assistant_empty_html(item: dict[str, object] | None) -> str:
             "<span>L'assistant utilisera uniquement les passages réellement transcrits et leurs timecodes.</span></section>"
         )
     return (
-        "<section class='assistant-empty'><strong>Posez une question vérifiable</strong>"
-        "<span>Exemple : « La cliente affirme que le Master lui a annoncé un retour. Est-ce confirmé dans l'audio ? »</span>"
+        "<section class='assistant-empty'><strong>Interrogez la consultation</strong>"
+        "<span>Demandez une synthèse, recherchez un thème ou vérifiez précisément ce qui a été dit.</span>"
+        "<span>Exemples : « De quoi parle principalement la consultation ? », "
+        "« Est-ce que ça parle d'amour ? » ou « Le Master a-t-il annoncé un retour ? »</span>"
         "<span>Les réponses portent sur ce qui est dit pendant la consultation, pas sur la vérité extérieure.</span></section>"
     )
+
+
+def _assistant_result_presentation(
+    result: dict[str, object],
+) -> dict[str, str | bool]:
+    """Décrit le rendu d'un résultat sans casser le schéma historique.
+
+    Les versions initiales de l'assistant exposaient uniquement un ``verdict``
+    de vérification. Le moteur plus récent distingue les synthèses et les
+    recherches de thème avec ``intent`` et, selon la version persistée, un
+    ``verdict`` ou un ``status`` dédié. Cette couche accepte les deux formes :
+    les anciens libellés restent strictement inchangés dans le rendu.
+    """
+
+    intent = str(
+        result.get("intent")
+        or result.get("query_intent")
+        or result.get("question_intent")
+        or ""
+    ).strip().casefold().replace("-", "_").replace(" ", "_")
+    outcome = str(
+        result.get("verdict")
+        or result.get("status")
+        or "Non retrouvé"
+    ).strip()
+    folded_outcome = outcome.casefold()
+
+    summary_intents = {
+        "open_summary",
+        "summary",
+        "synthesis",
+        "synthese",
+        "resume",
+    }
+    topic_intents = {
+        "topic",
+        "topic_presence",
+        "theme",
+        "theme_presence",
+        "presence",
+    }
+    general_intents = {
+        "consultation_qa",
+        "general_question",
+        "question_answering",
+        "qa",
+    }
+    summary_outcomes = {"synthèse", "synthese", "résumé", "resume"}
+    topic_presentations = {
+        "thème principal": (
+            "theme-primary",
+            "Thème principal",
+            "Analyse thématique locale · Thème central",
+        ),
+        "theme principal": (
+            "theme-primary",
+            "Thème principal",
+            "Analyse thématique locale · Thème central",
+        ),
+        "thème présent": (
+            "theme-present",
+            "Thème présent",
+            "Analyse thématique locale · Présence confirmée",
+        ),
+        "theme present": (
+            "theme-present",
+            "Thème présent",
+            "Analyse thématique locale · Présence confirmée",
+        ),
+        "mention ponctuelle": (
+            "mention",
+            "Mention ponctuelle",
+            "Analyse thématique locale · Présence limitée",
+        ),
+    }
+
+    if intent in summary_intents or folded_outcome in summary_outcomes:
+        return {
+            "is_new": True,
+            "kind": "summary",
+            "verdict": "Synthèse",
+            "class": "summary",
+            "label": "Synthèse",
+            "confidence": "Synthèse locale · Sources citées",
+            "result_label": "Synthèse de la consultation",
+            "points_label": "Points clés",
+            "nuance_label": "Portée de la synthèse",
+            "evidence_label": "Passages sources",
+            "region_label": "Résultat de la synthèse",
+        }
+
+    topic_presentation = topic_presentations.get(folded_outcome)
+    if topic_presentation is not None:
+        css_class, label, confidence = topic_presentation
+        return {
+            "is_new": True,
+            "kind": "topic",
+            "verdict": label,
+            "class": css_class,
+            "label": label,
+            "confidence": confidence,
+            "result_label": "Réponse thématique",
+            "points_label": "Ce que montrent les passages",
+            "nuance_label": "Lecture du thème",
+            "evidence_label": "Passages sources",
+            "region_label": "Résultat de l'analyse thématique",
+        }
+
+    # Une ancienne ou future persistance peut contenir l'intention mais omettre
+    # le statut spécialisé. On conserve alors le verdict lisible, tout en
+    # présentant correctement la nature de la réponse.
+    if intent in topic_intents:
+        return {
+            "is_new": True,
+            "kind": "topic",
+            "verdict": outcome,
+            "class": "theme-present",
+            "label": outcome,
+            "confidence": "Analyse thématique locale · Sources citées",
+            "result_label": "Réponse thématique",
+            "points_label": "Ce que montrent les passages",
+            "nuance_label": "Lecture du thème",
+            "evidence_label": "Passages sources",
+            "region_label": "Résultat de l'analyse thématique",
+        }
+
+    if intent in general_intents:
+        label = {
+            "Réponse": "Réponse fondée sur l'audio",
+            "Partiel": "Réponse partielle",
+            "Non retrouvé": "Éléments insuffisants",
+            "À clarifier": "À clarifier",
+        }.get(outcome, outcome)
+        return {
+            "is_new": True,
+            "kind": "question",
+            "verdict": outcome,
+            "class": "answered" if outcome == "Réponse" else {
+                "Partiel": "partial",
+                "Non retrouvé": "not-found",
+                "À clarifier": "clarify",
+            }.get(outcome, "answered"),
+            "label": label,
+            "confidence": "Assistant local · Sources citées",
+            "result_label": "Réponse à votre question",
+            "points_label": "Éléments de réponse",
+            "nuance_label": "Limites de l'analyse",
+            "evidence_label": "Passages sources",
+            "region_label": "Réponse de l'assistant sur la consultation",
+        }
+
+    legacy_class = {
+        "Confirmé": "confirmed",
+        "Partiel": "partial",
+        "Contredit": "contradicted",
+        "Non retrouvé": "not-found",
+        "À clarifier": "clarify",
+    }.get(outcome, "not-found")
+    legacy_label = {
+        "Confirmé": "Appuyé par l'audio",
+        "Partiel": "Appuyé avec nuance",
+        "Contredit": "Passage contraire explicite",
+        "Non retrouvé": "Éléments insuffisants",
+        "À clarifier": "À clarifier",
+    }.get(outcome, outcome)
+    return {
+        "is_new": False,
+        "kind": "verification",
+        "verdict": outcome,
+        "class": legacy_class,
+        "label": legacy_label,
+        "confidence": "",
+        "result_label": "Réponse détaillée",
+        "points_label": "Ce que montrent les passages",
+        "nuance_label": "Lecture prudente",
+        "evidence_label": "Passages retenus",
+        "region_label": "Résultat de la vérification",
+    }
 
 
 def _assistant_result_html(
@@ -6566,24 +6915,16 @@ def _assistant_result_html(
     if not isinstance(result, dict):
         return _assistant_empty_html(item)
 
-    verdict = str(result.get("verdict") or "Non retrouvé")
-    verdict_class = {
-        "Confirmé": "confirmed",
-        "Partiel": "partial",
-        "Contredit": "contradicted",
-        "Non retrouvé": "not-found",
-        "À clarifier": "clarify",
-    }.get(verdict, "not-found")
-    verdict_label = {
-        "Confirmé": "Appuyé par l'audio",
-        "Partiel": "Appuyé avec nuance",
-        "Contredit": "Passage contraire explicite",
-        "Non retrouvé": "Éléments insuffisants",
-        "À clarifier": "À clarifier",
-    }.get(verdict, verdict)
+    presentation = _assistant_result_presentation(result)
+    verdict = str(presentation["verdict"])
+    verdict_class = str(presentation["class"])
+    verdict_label = str(presentation["label"])
+    is_new_result = bool(presentation["is_new"])
     stored_answer = str(result.get("answer") or result.get("explanation") or "")
     backend = str(result.get("backend") or "")
-    if verdict == "À clarifier":
+    if is_new_result:
+        confidence = str(presentation["confidence"])
+    elif verdict == "À clarifier":
         confidence = "Référent ambigu · Choix nécessaire"
     elif backend.startswith("déterministe"):
         confidence = "Analyse lexicale locale · Relecture conseillée"
@@ -6698,9 +7039,10 @@ def _assistant_result_html(
             )
 
     evidence_count = len(citations_html)
+    evidence_label = str(presentation["evidence_label"])
     evidence = (
         "<section class='assistant-citations'>"
-        f"<strong>Passages retenus · {evidence_count}</strong>"
+        f"<strong>{html.escape(evidence_label)} · {evidence_count}</strong>"
         + (
             "".join(citations_html)
             if citations_html
@@ -6709,11 +7051,34 @@ def _assistant_result_html(
         + "</section>"
     )
     raw_points = result.get("analysis_points")
-    if isinstance(raw_points, list) and any(str(point).strip() for point in raw_points):
+    if not isinstance(raw_points, (list, tuple)):
+        raw_points = result.get("key_points")
+
+    def point_text(point: object) -> str:
+        if isinstance(point, dict):
+            return str(
+                point.get("text")
+                or point.get("label")
+                or point.get("summary")
+                or ""
+            ).strip()
+        return str(point or "").strip()
+
+    if isinstance(raw_points, (list, tuple)) and any(
+        point_text(point) for point in raw_points
+    ):
         answer = stored_answer
         analysis_points = tuple(
-            str(point).strip() for point in raw_points if str(point).strip()
+            point_text(point) for point in raw_points if point_text(point)
         )
+        nuance = str(result.get("nuance") or "").strip()
+    elif is_new_result:
+        # Les synthèses et recherches de thème ne doivent jamais repasser par
+        # ``build_answer_sections`` : cette fonction historique interprète
+        # toute entrée comme une affirmation binaire et recréerait précisément
+        # les faux « Contredit » que le nouveau routage évite.
+        answer = stored_answer
+        analysis_points = ()
         nuance = str(result.get("nuance") or "").strip()
     else:
         generated_answer, analysis_points, nuance = build_answer_sections(
@@ -6738,14 +7103,16 @@ def _assistant_result_html(
         )
     points_html = ""
     if analysis_points:
+        points_label = str(presentation["points_label"])
         points_html = (
             "<section class='assistant-analysis-points'>"
-            "<strong>Ce que montrent les passages</strong><ol>"
+            f"<strong>{html.escape(points_label)}</strong><ol>"
             + "".join(f"<li>{html.escape(point)}</li>" for point in analysis_points)
             + "</ol></section>"
         )
+    nuance_label = str(presentation["nuance_label"])
     nuance_html = (
-        "<section class='assistant-analysis-nuance'><strong>Lecture prudente</strong>"
+        f"<section class='assistant-analysis-nuance'><strong>{html.escape(nuance_label)}</strong>"
         f"<p>{html.escape(nuance)}</p></section>"
         if nuance
         else ""
@@ -6759,10 +7126,12 @@ def _assistant_result_html(
         else ""
     )
     live_attribute = ' aria-live="polite"' if live else ""
+    result_label = str(presentation["result_label"])
+    region_label = str(presentation["region_label"])
     return f"""
-      <article class="assistant-answer" role="region" aria-label="Résultat de la vérification"{live_attribute} tabindex="-1">
+      <article class="assistant-answer" role="region" aria-label="{html.escape(region_label, quote=True)}"{live_attribute} tabindex="-1">
         {header_html}
-        <span class="assistant-result-label">Réponse détaillée</span>
+        <span class="assistant-result-label">{html.escape(result_label)}</span>
         <div class="assistant-response-copy">
           <p>{html.escape(answer or "Aucun passage suffisamment probant n'a été identifié.")}</p>
         </div>
@@ -6809,16 +7178,15 @@ def _assistant_history_html(
         result = query.get("result") if isinstance(query.get("result"), dict) else {}
         rendered_result = dict(result)
         rendered_result.setdefault("question", question)
-        verdict = str(result.get("verdict") or "Analyse")
-        verdict_class = {
-            "Confirmé": "confirmed",
-            "Partiel": "partial",
-            "Contredit": "contradicted",
-            "Non retrouvé": "not-found",
-            "À clarifier": "clarify",
-        }.get(verdict, "not-found")
+        presentation = _assistant_result_presentation(rendered_result)
+        verdict = str(presentation["verdict"])
+        verdict_class = str(presentation["class"])
         preview = str(result.get("answer") or result.get("explanation") or "").strip()
-        confidence = _confidence_label(result.get("confidence"))
+        confidence = (
+            str(presentation["confidence"])
+            if bool(presentation["is_new"])
+            else _confidence_label(result.get("confidence"))
+        )
         citations = result.get("citations") if isinstance(result.get("citations"), list) else []
         created_raw, created_label = _assistant_history_timestamp(query.get("created_at"))
         query_id = re.sub(
@@ -6934,7 +7302,13 @@ def sync_workspace_ui(
     workspace_state: dict[str, object] | None,
 ):
     paths = _normalise_audio_paths(audio_files)
-    state = normalise_workspace(workspace_state or load_workspace())
+    # Le composant File peut émettre `.change()` après une mise à jour serveur.
+    # Son gr.State d'entrée est alors potentiellement en retard sur le worker
+    # (notamment juste après la fin d'une transcription). L'état durable reste
+    # donc la seule source d'autorité ; le paramètre est conservé pour ne pas
+    # modifier le contrat public du callback Gradio.
+    _ = workspace_state
+    state = load_workspace()
     items = _workspace_items(state)
     library_order = _workspace_order(state)
     queue_order: list[str] = []
@@ -6960,6 +7334,14 @@ def sync_workspace_ui(
             "progress": float(previous.get("progress") or 0.0),
             "processing_time": str(previous.get("processing_time") or "—"),
             "processing_seconds": float(previous.get("processing_seconds") or 0.0),
+            "processing_base_seconds": float(
+                previous.get("processing_base_seconds")
+                if previous.get("processing_base_seconds") is not None
+                else previous.get("processing_seconds") or 0.0
+            ),
+            "processing_started_at": str(
+                previous.get("processing_started_at") or ""
+            ),
             "partial": str(previous.get("partial") or ""),
             "stage": str(previous.get("stage") or ""),
             "settings": previous.get("settings") if isinstance(previous.get("settings"), dict) else {},
@@ -7914,9 +8296,9 @@ def run_assistant_verification_ui(
 ):
     clean_question = str(question or "").strip()
     if not clean_question:
-        raise gr.Error("Écrivez l'affirmation ou la question à vérifier.")
+        raise gr.Error("Écrivez une question sur la consultation.")
     if len(clean_question) > 4000:
-        raise gr.Error("Cette question est trop longue. Résumez l'affirmation à vérifier.")
+        raise gr.Error("Cette question est trop longue. Reformulez-la plus brièvement.")
 
     state = load_workspace()
     if item_id not in _workspace_items(state):
@@ -7943,12 +8325,19 @@ def run_assistant_verification_ui(
         "client_speaker_id": client_id,
         "master_speaker_id": master_id,
     }
+    audio_observations = None
+    if question_needs_audio_analysis(clean_question):
+        audio_path = str(item.get("path") or item.get("source_path") or "")
+        audio_observations = analyze_audio_dynamics(audio_path, turns)
     result = verify_claim(
         clean_question,
         turns,
         role_payload,
         reasoner=get_default_reasoner(),
+        audio_observations=audio_observations,
     )
+    if audio_observations is not None:
+        result["audio_observations"] = audio_observations
     result["answer"] = str(result.get("answer") or result.get("explanation") or "")
     coverage = result.get("coverage") if isinstance(result.get("coverage"), dict) else {}
     coverage["role_mapping_confirmed"] = True
@@ -8053,6 +8442,14 @@ def _prepare_transcription_workspace(
             "progress": float(previous.get("progress") or 0.0),
             "processing_time": str(previous.get("processing_time") or "—"),
             "processing_seconds": float(previous.get("processing_seconds") or 0.0),
+            "processing_base_seconds": float(
+                previous.get("processing_base_seconds")
+                if previous.get("processing_base_seconds") is not None
+                else previous.get("processing_seconds") or 0.0
+            ),
+            "processing_started_at": str(
+                previous.get("processing_started_at") or ""
+            ),
             "partial": str(previous.get("partial") or ""),
             "stage": str(previous.get("stage") or ""),
             "settings": previous.get("settings") if isinstance(previous.get("settings"), dict) else {},
@@ -8330,6 +8727,59 @@ def restore_workspace_ui():
     )
 
 
+_WORKSPACE_POLL_VOLATILE_ITEM_KEYS = frozenset(
+    {
+        "progress",
+        "processing_time",
+        "processing_seconds",
+        "partial",
+        "stage",
+        "checkpoint_position",
+        "heartbeat",
+        "updated_at",
+    }
+)
+
+
+def _workspace_poll_digest(value: object) -> str:
+    payload = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
+def _workspace_poll_stable_state(state: dict[str, object]) -> dict[str, object]:
+    stable_state = copy.deepcopy(state)
+    items = stable_state.get("items")
+    if isinstance(items, dict):
+        for item in items.values():
+            if not isinstance(item, dict):
+                continue
+            for key in _WORKSPACE_POLL_VOLATILE_ITEM_KEYS:
+                item.pop(key, None)
+    return stable_state
+
+
+def _workspace_poll_revision_parts(value: str | None) -> dict[str, str]:
+    if not value:
+        return {}
+    try:
+        decoded = json.loads(value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {"full": str(value)}
+    if not isinstance(decoded, dict) or decoded.get("version") != 2:
+        return {"full": str(value)}
+    return {
+        str(key): str(part)
+        for key, part in decoded.items()
+        if isinstance(key, str) and isinstance(part, (str, int))
+    }
+
+
 def poll_workspace_ui(
     selected_item: str | None,
     sort_by: str | None,
@@ -8339,15 +8789,7 @@ def poll_workspace_ui(
 ):
     """Reconnecte l'interface à l'état durable sans dépendre de la requête de lancement."""
 
-    JOB_MANAGER.recover_orphaned()
     state = load_workspace()
-    revision = hashlib.sha1(
-        json.dumps(state, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
-            "utf-8"
-        )
-    ).hexdigest()
-    if last_revision == revision:
-        return (revision, *([gr.skip()] * 20))
     order = _workspace_order(state)
     if selected_item not in order:
         active_ids = JOB_MANAGER.active_item_ids()
@@ -8382,13 +8824,87 @@ def poll_workspace_ui(
     )
     reply_target_is_valid = str(reply_target or "") in comment_ids
     reply_target = str(reply_target) if reply_target_is_valid else ""
+    queue_rows = _workspace_queue_rows(state)
+    library_rows = _workspace_library_rows(state, sort_by)
+    fiche_header = _fiche_header_html(item)
+    fiche_transcript = _item_transcript(item)
+    workspace_status = _workspace_status_markdown(state)
+    dashboard = _dashboard_html(state)
+    assistant_payload = _assistant_panel_payload(item)
+    poll_context = {
+        "selected_item": selected_item,
+        "sort_by": sort_by,
+        "selected_comment": selected_comment,
+        "reply_target": reply_target,
+    }
+    revision_parts = {
+        "version": 2,
+        "full": _workspace_poll_digest({"state": state, "context": poll_context}),
+        "stable": _workspace_poll_digest(
+            {
+                "state": _workspace_poll_stable_state(state),
+                "context": poll_context,
+            }
+        ),
+        "queue": _workspace_poll_digest(queue_rows),
+        "library": _workspace_poll_digest(library_rows),
+        "header": _workspace_poll_digest(fiche_header),
+        "transcript": _workspace_poll_digest(fiche_transcript),
+        "status": _workspace_poll_digest(workspace_status),
+        "dashboard": _workspace_poll_digest(dashboard),
+        "assistant": _workspace_poll_digest(
+            {
+                "role_summary": assistant_payload[0],
+                "speaker_choices": _speaker_choices(item),
+                "proposal": _assistant_role_proposal(item),
+                "client_excerpt": assistant_payload[3],
+                "master_excerpt": assistant_payload[4],
+                "result": assistant_payload[5],
+                "submit_enabled": bool(_item_turns(item)),
+            }
+        ),
+    }
+    revision = json.dumps(revision_parts, sort_keys=True, separators=(",", ":"))
+    previous_revision = _workspace_poll_revision_parts(last_revision)
+    if previous_revision.get("full") == revision_parts["full"]:
+        return (revision, *([gr.skip()] * 27))
+
+    stable_changed = previous_revision.get("stable") != revision_parts["stable"]
+    if not stable_changed:
+        changed = lambda key: previous_revision.get(key) != revision_parts[key]
+        transcript_update = fiche_transcript if changed("transcript") else gr.skip()
+        return (
+            revision,
+            gr.skip(),
+            queue_rows if changed("queue") else gr.skip(),
+            library_rows if changed("library") else gr.skip(),
+            fiche_header if changed("header") else gr.skip(),
+            transcript_update,
+            gr.skip(),
+            gr.skip(),
+            gr.skip(),
+            transcript_update,
+            gr.skip(),
+            gr.skip(),
+            gr.skip(),
+            workspace_status if changed("status") else gr.skip(),
+            dashboard if changed("dashboard") else gr.skip(),
+            gr.skip(),
+            gr.skip(),
+            gr.skip(),
+            gr.skip(),
+            gr.skip(),
+            gr.skip(),
+            *(assistant_payload if changed("assistant") else ([gr.skip()] * 7)),
+        )
+
     return (
         revision,
         state,
-        _workspace_queue_rows(state),
-        _workspace_library_rows(state, sort_by),
-        _fiche_header_html(item),
-        _item_transcript(item),
+        queue_rows,
+        library_rows,
+        fiche_header,
+        fiche_transcript,
         _comments_feed_html(item),
         gr.Dropdown(
             choices=batch_order,
@@ -8400,8 +8916,8 @@ def poll_workspace_ui(
         files,
         batch,
         metadata,
-        _workspace_status_markdown(state),
-        _dashboard_html(state),
+        workspace_status,
+        dashboard,
         gr.Dropdown(
             choices=comment_choices,
             value=selected_comment,
@@ -8415,17 +8931,54 @@ def poll_workspace_ui(
             interactive=bool(selected_comment),
         ),
         gr.skip() if reply_target_is_valid else "",
+        *assistant_payload,
     )
 
 
 def poll_workspace_queue_ui(audio_files: object = None):
-    """Synchronise l'uploader sans modifier le contrat historique du poll principal."""
+    """Retire uniquement les audios terminés d'un uploader déjà cohérent.
+
+    Une écriture serveur dans ``gr.File`` redéclenche son listener ``.change``.
+    Le poll ne doit donc jamais restaurer la file durable pendant qu'un upload,
+    une suppression, un vidage ou un glisser-déposer est encore en cours. Il
+    n'écrit que lorsque tous les chemins visibles sont déjà connus, que les
+    éléments encore actifs sont présents dans le même ordre et que les seuls
+    éléments à retirer sont des transcriptions terminées.
+    """
+
+    if JOB_MANAGER.is_active():
+        return (gr.skip(), gr.skip(), gr.skip())
 
     state = load_workspace()
-    queue_paths = [path for _, path in _workspace_queue_assets(state)]
     visible_paths = _normalise_audio_paths(audio_files)
-    if [str(path) for path in visible_paths] == [str(path) for path in queue_paths]:
+    visible_ids: list[str] = []
+    for path in visible_paths:
+        item_id = _workspace_audio_id_for_path(state, path)
+        if item_id is None or item_id in visible_ids:
+            return (gr.skip(), gr.skip(), gr.skip())
+        visible_ids.append(item_id)
+
+    queue_assets = _workspace_queue_assets(state)
+    queue_ids = [item_id for item_id, _ in queue_assets]
+    queue_id_set = set(queue_ids)
+    visible_queue_ids = [
+        item_id for item_id in visible_ids if item_id in queue_id_set
+    ]
+    if visible_queue_ids != queue_ids:
         return (gr.skip(), gr.skip(), gr.skip())
+
+    items = _workspace_items(state)
+    completed_extras = [
+        item_id for item_id in visible_ids if item_id not in queue_id_set
+    ]
+    if not completed_extras or any(
+        str(items.get(item_id, {}).get("status") or "") != "Terminé"
+        or not isinstance(items.get(item_id, {}).get("result"), dict)
+        for item_id in completed_extras
+    ):
+        return (gr.skip(), gr.skip(), gr.skip())
+
+    queue_paths = [path for _, path in queue_assets]
     return (
         [str(path) for path in queue_paths],
         _queue_hint(queue_paths),
@@ -9089,7 +9642,7 @@ def _build_app_single_page() -> gr.Blocks:
                     visible=False,
                 )
             gr.HTML(
-                "<p class='setup-footnote'>Téléchargement unique · environ 2,3 Go · les modèles restent sur cet ordinateur</p>"
+                "<p class='setup-footnote'>Téléchargement unique · environ 8 Go · les modèles restent sur cet ordinateur</p>"
             )
 
         with gr.Column(visible=setup_ready, elem_id="app-screen") as main_screen:
@@ -9399,6 +9952,8 @@ def _build_app_single_page() -> gr.Blocks:
                     transcribe_button,
                 ],
                 queue=False,
+                show_progress="hidden",
+                show_progress_on=[],
             )
             queue_change.then(
                 fn=sync_workspace_ui,
@@ -9415,6 +9970,8 @@ def _build_app_single_page() -> gr.Blocks:
                     comment_resolve_button,
                 ],
                 queue=False,
+                show_progress="hidden",
+                show_progress_on=[],
             )
             inline_rename = inline_rename_submit.click(
                 fn=rename_audio_by_index_ui,
@@ -9790,7 +10347,7 @@ def build_app() -> gr.Blocks:
                     visible=False,
                 )
             gr.HTML(
-                "<p class='setup-footnote'>Téléchargement unique · environ 2,3 Go · modèles et données conservés sur ce PC</p>"
+                "<p class='setup-footnote'>Téléchargement unique · environ 8 Go · modèles et données conservés sur ce PC</p>"
             )
 
         with gr.Column(visible=setup_ready, elem_id="app-screen") as main_screen:
@@ -10244,22 +10801,25 @@ def build_app() -> gr.Blocks:
                                         gr.HTML(
                                             "<section class='assistant-intro' aria-labelledby='assistant-verification-title'><div>"
                                             "<div class='assistant-intro-title'><span class='assistant-step'>Assistant audio</span>"
-                                            "<h3 id='assistant-verification-title'>Vérifier une affirmation</h3></div>"
+                                            "<h3 id='assistant-verification-title'>Interroger la consultation</h3></div>"
                                             "<span class='assistant-local-badge'>Analyse locale</span></div>"
-                                            "<p>Formulez précisément ce que vous voulez confirmer. L'assistant retrouve les passages pertinents et vérifie ce qui a été dit dans l'audio.</p></section>"
+                                            "<p>Demandez une synthèse, recherchez un thème ou vérifiez précisément ce qui a été dit. "
+                                            "Chaque réponse reste reliée aux passages et timecodes de l'audio.</p></section>"
                                         )
                                         assistant_question = gr.Textbox(
-                                            label="Ce que vous voulez vérifier",
-                                            placeholder="Ex. Le Master a-t-il annoncé une séparation avec OrionX ?",
+                                            label="Votre question",
+                                            placeholder="Ex. De quoi parle principalement cette consultation ?",
                                             lines=3,
                                             elem_id="assistant-question",
                                         )
                                         gr.HTML(
-                                            "<p class='assistant-form-hint'>Précisez la personne, la relation ou la date concernée pour obtenir une réponse plus fiable.</p>"
+                                            "<p class='assistant-form-hint'>Exemples : « Est-ce que ça parle d'amour ? » "
+                                            "« Le ton monte-t-il durant l'échange ? » ou "
+                                            "« Le Master a-t-il annoncé une séparation ? »</p>"
                                         )
                                         with gr.Row(elem_classes=["assistant-actions"]):
                                             assistant_submit = gr.Button(
-                                                "Vérifier dans l'audio",
+                                                "Analyser l'audio",
                                                 variant="primary",
                                                 interactive=bool(_item_turns(initial_item)),
                                                 elem_id="assistant-submit",
@@ -10597,6 +11157,8 @@ def build_app() -> gr.Blocks:
                     transcribe_button,
                 ],
                 queue=False,
+                show_progress="hidden",
+                show_progress_on=[],
             )
             queue_change.then(
                 fn=sync_workspace_ui,
@@ -10614,6 +11176,8 @@ def build_app() -> gr.Blocks:
                     dashboard,
                 ],
                 queue=False,
+                show_progress="hidden",
+                show_progress_on=[],
             )
             inline_rename = inline_rename_submit.click(
                 fn=rename_audio_by_target_ui,
@@ -10671,6 +11235,7 @@ def build_app() -> gr.Blocks:
                 inputs=[workspace_state, library_sort],
                 outputs=[fiche_library_table],
                 queue=False,
+                show_progress="hidden",
             )
             workspace_state.change(
                 fn=load_assistant_ui,
@@ -10685,6 +11250,7 @@ def build_app() -> gr.Blocks:
                     assistant_submit,
                 ],
                 queue=False,
+                show_progress="hidden",
             )
             library_open_action = library_open_submit.click(
                 fn=open_library_fiche_by_index_ui,
@@ -11282,10 +11848,18 @@ def build_app() -> gr.Blocks:
                     comment_reply_button,
                     comment_resolve_button,
                     comment_reply_body,
+                    assistant_role_summary,
+                    assistant_client_role,
+                    assistant_master_role,
+                    assistant_client_excerpt,
+                    assistant_master_excerpt,
+                    assistant_result,
+                    assistant_submit,
                 ],
                 queue=False,
                 trigger_mode="always_last",
                 show_progress="hidden",
+                show_progress_on=[],
             )
             workspace_timer.tick(
                 fn=poll_workspace_queue_ui,
@@ -11294,6 +11868,7 @@ def build_app() -> gr.Blocks:
                 queue=False,
                 trigger_mode="always_last",
                 show_progress="hidden",
+                show_progress_on=[],
             )
 
         setup_outputs = [
@@ -11332,6 +11907,16 @@ def build_app() -> gr.Blocks:
         app.load(
             fn=None,
             js=TRANSCRIPT_DISCUSSION_JS,
+            queue=False,
+        )
+        app.load(
+            fn=None,
+            js=DESKTOP_VISIBILITY_SYNC_JS,
+            queue=False,
+        )
+        app.load(
+            fn=None,
+            js=PROCESSING_CLOCK_JS,
             queue=False,
         )
         app.load(

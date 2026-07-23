@@ -5,6 +5,7 @@ import unittest
 from transcription_locale.ui import (
     AUDIO_TIMELINE_HTML,
     CUSTOM_CSS,
+    DELETE_ACTION_JS,
     ROLE_EDITOR_JS,
     TIMELINE_INIT_JS,
 )
@@ -105,6 +106,13 @@ class DesktopResponsiveCssTests(unittest.TestCase):
         self.assertIn('aria-valuetext="Vue complète"', AUDIO_TIMELINE_HTML)
         self.assertIn("Enregistrement complet", AUDIO_TIMELINE_HTML)
         self.assertIn("zoom: 0", TIMELINE_INIT_JS)
+
+    def test_delete_icon_is_embedded_instead_of_loaded_from_a_project_url(
+        self,
+    ) -> None:
+        self.assertNotIn("/gradio_api/file=assets/icons", DELETE_ACTION_JS)
+        self.assertIn("<svg viewBox=", DELETE_ACTION_JS)
+        self.assertIn('document.createElement("span")', DELETE_ACTION_JS)
 
 
 if __name__ == "__main__":

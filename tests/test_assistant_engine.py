@@ -6,18 +6,28 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from transcription_locale.assistant_engine import (
+    ANSWERED,
+    CLAIM_VERIFICATION,
     CLARIFY,
     CONFIRMED,
     CONTRADICTED,
     NOT_FOUND,
+    OPEN_SUMMARY,
     OpenVINOJsonReasoner,
     PARTIAL,
     ReasonerDecision,
+    SUMMARY,
+    TOPIC_MENTIONED,
+    TOPIC_PRESENCE,
+    TOPIC_PRESENT,
+    build_consultation_prompt,
     build_grounded_prompt,
+    classify_query_intent,
     extract_claim,
     get_default_reasoner,
     propose_speaker_roles,
     retrieve_passages,
+    resolve_openvino_assistant_model_path,
     suggest_speaker_roles,
     verify_claim,
     verify_claim_result,
@@ -55,6 +65,51 @@ def consultation_turns() -> list[TranscriptTurn]:
             "VOICE_A",
             "Interlocuteur 1",
             "D'accord, merci beaucoup.",
+        ),
+    ]
+
+
+def relationship_consultation_turns() -> list[TranscriptTurn]:
+    """Consultation synthétique proche des formulations métier réelles."""
+
+    return [
+        TranscriptTurn(
+            0.0,
+            12.0,
+            "CLIENT",
+            "Client",
+            "Je voudrais savoir comment va évoluer ma relation sentimentale avec Cédric.",
+        ),
+        TranscriptTurn(
+            12.0,
+            42.0,
+            "MASTER",
+            "Master",
+            "Cédric pense encore beaucoup à vous. Son autre relation est surtout "
+            "une relation de confort, sans grand investissement émotionnel.",
+        ),
+        TranscriptTurn(
+            42.0,
+            68.0,
+            "MASTER",
+            "Master",
+            "Pour Cédric et Mélanie, je vois des tensions et une séparation "
+            "progressive. Je ne précise pas encore quand elle sera définitive.",
+        ),
+        TranscriptTurn(
+            68.0,
+            96.0,
+            "MASTER",
+            "Master",
+            "Entre vous et Cédric, un rapprochement reste possible et votre lien "
+            "peut se stabiliser.",
+        ),
+        TranscriptTurn(
+            96.0,
+            108.0,
+            "MASTER",
+            "Master",
+            "Vous pourriez vous revoir au retour de ses vacances.",
         ),
     ]
 
@@ -126,6 +181,138 @@ class RetrievalTests(unittest.TestCase):
             results[0].text,
             "Je vois que vous allez changer de travail au mois de septembre.",
         )
+
+
+class QueryIntentTests(unittest.TestCase):
+    def test_classifier_routes_summary_topic_and_claim_questions(self) -> None:
+        self.assertEqual(
+            classify_query_intent("La consultation parle de quoi principalement ?"),
+            OPEN_SUMMARY,
+        )
+        self.assertEqual(
+            classify_query_intent("Est-ce que ça parle d'amour et de relation ?"),
+            TOPIC_PRESENCE,
+        )
+        self.assertEqual(
+            classify_query_intent(
+                "Le Master dit-il que la relation avec Cédric va se terminer ?"
+            ),
+            CLAIM_VERIFICATION,
+        )
+
+
+class IntentVerificationTests(unittest.TestCase):
+    def test_open_summary_describes_the_main_relationship_topic(self) -> None:
+        result = verify_claim_result(
+            relationship_consultation_turns(),
+            "La consultation parle de quoi principalement ?",
+        )
+
+        self.assertEqual(result.intent, OPEN_SUMMARY)
+        self.assertEqual(result.verdict, SUMMARY)
+        self.assertIn("relation", result.answer.lower())
+        self.assertIn("Cédric", result.answer)
+        self.assertTrue(result.citations)
+        self.assertFalse(result.answer.startswith(("Oui.", "Non.")))
+
+    def test_relationship_topic_is_present_despite_an_unrelated_negation(self) -> None:
+        turns = [
+            TranscriptTurn(
+                0.0,
+                5.0,
+                "CLIENT",
+                "Client",
+                "Je voudrais parler de ma vie sentimentale.",
+            ),
+            TranscriptTurn(
+                5.0,
+                18.0,
+                "MASTER",
+                "Master",
+                "Votre relation amoureuse avec Cédric peut se stabiliser, mais je "
+                "ne précise pas encore la date.",
+            ),
+            TranscriptTurn(
+                18.0,
+                30.0,
+                "CLIENT",
+                "Client",
+                "Je cherche aussi un nouvel emploi et je prépare un entretien.",
+            ),
+            TranscriptTurn(
+                30.0,
+                45.0,
+                "MASTER",
+                "Master",
+                "Votre travail va évoluer avec un changement de poste dans votre "
+                "carrière professionnelle.",
+            ),
+            TranscriptTurn(
+                45.0,
+                60.0,
+                "MASTER",
+                "Master",
+                "Je vois un entretien d'embauche positif pour ce nouvel emploi.",
+            ),
+        ]
+
+        result = verify_claim_result(
+            turns,
+            "Est-ce que ça parle d'amour et de relation ?",
+        )
+
+        self.assertEqual(result.intent, TOPIC_PRESENCE)
+        self.assertEqual(result.verdict, TOPIC_PRESENT)
+        self.assertTrue(result.citations)
+        self.assertNotEqual(result.verdict, CONTRADICTED)
+
+    def test_travel_is_reported_as_a_secondary_mention(self) -> None:
+        result = verify_claim_result(
+            relationship_consultation_turns(),
+            "Est-ce que la consultation parle de voyage ?",
+        )
+
+        self.assertEqual(result.intent, TOPIC_PRESENCE)
+        self.assertEqual(result.verdict, TOPIC_MENTIONED)
+        self.assertTrue(result.citations)
+        self.assertIn("vacances", result.citations[0].text.lower())
+
+    def test_absent_health_topic_is_not_found_without_citation(self) -> None:
+        result = verify_claim_result(
+            relationship_consultation_turns(),
+            "Est-ce que la consultation parle de santé ?",
+        )
+
+        self.assertEqual(result.intent, TOPIC_PRESENCE)
+        self.assertEqual(result.verdict, NOT_FOUND)
+        self.assertEqual(result.citations, ())
+
+    def test_real_claim_contradiction_remains_supported(self) -> None:
+        turns = [
+            TranscriptTurn(
+                0.0,
+                5.0,
+                "CLIENT",
+                "Client",
+                "Je voudrais savoir si ma relation avec Cédric va se terminer.",
+            ),
+            TranscriptTurn(
+                5.0,
+                12.0,
+                "MASTER",
+                "Master",
+                "Je vous confirme que la relation avec Cédric ne se terminera pas.",
+            ),
+        ]
+
+        result = verify_claim_result(
+            turns,
+            "Le Master dit-il que la relation avec Cédric va se terminer ?",
+        )
+
+        self.assertEqual(result.intent, CLAIM_VERIFICATION)
+        self.assertEqual(result.verdict, CONTRADICTED)
+        self.assertEqual(result.citations[0].start, 5.0)
 
 
 class VerificationTests(unittest.TestCase):
@@ -445,6 +632,81 @@ class OptionalReasonerTests(unittest.TestCase):
         with patch.dict("os.environ", {}, clear=True):
             self.assertIsNone(get_default_reasoner())
 
+    def test_bundled_openvino_model_takes_priority_over_downloaded_copy(
+        self,
+    ) -> None:
+        from transcription_locale.assistant_engine import (
+            ASSISTANT_MODEL_NAME,
+            ASSISTANT_REQUIRED_MODEL_FILES,
+        )
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            resource_root = root / "resources"
+            app_data_root = root / "data"
+            bundled = (
+                resource_root
+                / "modeles"
+                / "assistant"
+                / ASSISTANT_MODEL_NAME
+            )
+            downloaded = (
+                app_data_root
+                / "modeles"
+                / "assistant"
+                / ASSISTANT_MODEL_NAME
+            )
+            for directory in (bundled, downloaded):
+                directory.mkdir(parents=True)
+                for name in ASSISTANT_REQUIRED_MODEL_FILES:
+                    (directory / name).write_text("test", encoding="utf-8")
+
+            resolved = resolve_openvino_assistant_model_path(
+                environ={},
+                app_data_root=app_data_root,
+                resource_root=resource_root,
+            )
+
+        self.assertEqual(resolved, bundled.resolve())
+
+    def test_stale_environment_path_falls_back_to_bundled_openvino_model(
+        self,
+    ) -> None:
+        from transcription_locale.assistant_engine import (
+            ASSISTANT_MODEL_ENV,
+            ASSISTANT_MODEL_NAME,
+            ASSISTANT_REQUIRED_MODEL_FILES,
+        )
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            resource_root = root / "resources"
+            bundled = (
+                resource_root
+                / "modeles"
+                / "assistant"
+                / ASSISTANT_MODEL_NAME
+            )
+            bundled.mkdir(parents=True)
+            for name in ASSISTANT_REQUIRED_MODEL_FILES:
+                (bundled / name).write_text("test", encoding="utf-8")
+            stale = root / "ancienne-installation" / ASSISTANT_MODEL_NAME
+
+            resolved = resolve_openvino_assistant_model_path(
+                environ={ASSISTANT_MODEL_ENV: str(stale)},
+                app_data_root=root / "data",
+                resource_root=resource_root,
+            )
+            explicitly_invalid = resolve_openvino_assistant_model_path(
+                stale,
+                environ={},
+                app_data_root=root / "data",
+                resource_root=resource_root,
+            )
+
+        self.assertEqual(resolved, bundled.resolve())
+        self.assertIsNone(explicitly_invalid)
+
     def test_openvino_reasoner_is_lazy_and_uses_only_grounded_ids(self) -> None:
         calls: list[tuple[str, str]] = []
 
@@ -474,6 +736,73 @@ class OptionalReasonerTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(payload["backend"], "OpenVINO-local")
         self.assertEqual(payload["citations"][0]["quote"], consultation_turns()[2].text)
+
+    def test_general_reasoner_answers_varied_questions_with_grounded_sources(self) -> None:
+        class GeneralReasoner:
+            name = "assistant-premium-test"
+
+            def answer(self, request):
+                self.request = request
+                return {
+                    "status": "answered",
+                    "confidence": 0.87,
+                    "answer": (
+                        "Le dialogue reste globalement calme, avec un désaccord "
+                        "ponctuel à la fin."
+                    ),
+                    "key_points": ["Un passage marque un désaccord explicite."],
+                    "nuance": "L'intensité vocale ne suffit pas à reconnaître la colère.",
+                    "citation_ids": [request.candidates[-1].id],
+                }
+
+        reasoner = GeneralReasoner()
+        result = verify_claim_result(
+            consultation_turns(),
+            "Comment évolue le ton de la conversation ?",
+            reasoner=reasoner,
+            audio_observations={
+                "available": True,
+                "loudness_change_db": 1.2,
+                "assessment": "stable_or_mixed",
+            },
+        )
+
+        self.assertEqual(result.verdict, ANSWERED)
+        self.assertEqual(result.backend, "assistant-premium-test")
+        self.assertEqual(result.intent, "consultation_qa")
+        self.assertEqual(result.confidence, 0.82)
+        self.assertEqual(result.citations[0].turn_index, 3)
+        self.assertIn("désaccord", result.answer)
+        self.assertTrue(reasoner.request.audio_observations["available"])
+
+    def test_consultation_prompt_contains_audio_metrics_and_bounded_ids(self) -> None:
+        class PromptCapturingReasoner:
+            name = "capture-premium"
+
+            def answer(self, request):
+                self.prompt = build_consultation_prompt(request)
+                return {
+                    "status": "answered",
+                    "confidence": 0.8,
+                    "answer": "Le Master occupe la plus grande partie de l'échange.",
+                    "key_points": ["Le Master développe les réponses."],
+                    "nuance": "Calcul fondé sur la transcription.",
+                    "citation_ids": [request.candidates[1].id],
+                }
+
+        reasoner = PromptCapturingReasoner()
+        verify_claim_result(
+            consultation_turns(),
+            "Qui développe le plus ses réponses ?",
+            reasoner=reasoner,
+            audio_observations={"available": True, "overlap_count": 0},
+        )
+
+        self.assertIn("<mesures_audio>", reasoner.prompt)
+        self.assertIn('"overlap_count":0', reasoner.prompt)
+        self.assertIn("[turn-00001]", reasoner.prompt)
+        self.assertIn("N'ajoute aucun fait extérieur", reasoner.prompt)
+        self.assertIn("donne les timecodes utiles", reasoner.prompt)
 
 
 if __name__ == "__main__":

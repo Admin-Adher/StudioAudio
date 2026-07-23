@@ -19,7 +19,9 @@ import json
 import importlib.util
 import math
 import os
+import platform
 import re
+import sys
 import unicodedata
 from collections import defaultdict
 from dataclasses import asdict, dataclass, replace
@@ -27,24 +29,136 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Callable, Literal, Mapping, Protocol, Sequence, runtime_checkable
 
+from .runtime_paths import APP_DATA_ROOT, RESOURCE_ROOT
+
 
 RoleName = Literal["Client", "Master", "Inconnu"]
+QueryIntent = Literal[
+    "open_summary",
+    "topic_presence",
+    "claim_verification",
+    "consultation_qa",
+]
 VerdictName = Literal[
     "Confirmé",
     "Partiel",
     "Contredit",
     "Non retrouvé",
     "À clarifier",
+    "Synthèse",
+    "Thème principal",
+    "Thème présent",
+    "Mention ponctuelle",
+    "Réponse",
 ]
+
+OPEN_SUMMARY: QueryIntent = "open_summary"
+TOPIC_PRESENCE: QueryIntent = "topic_presence"
+CLAIM_VERIFICATION: QueryIntent = "claim_verification"
+CONSULTATION_QA: QueryIntent = "consultation_qa"
 
 CONFIRMED: VerdictName = "Confirmé"
 PARTIAL: VerdictName = "Partiel"
 CONTRADICTED: VerdictName = "Contredit"
 NOT_FOUND: VerdictName = "Non retrouvé"
 CLARIFY: VerdictName = "À clarifier"
+SUMMARY: VerdictName = "Synthèse"
+TOPIC_PRIMARY: VerdictName = "Thème principal"
+TOPIC_PRESENT: VerdictName = "Thème présent"
+TOPIC_MENTIONED: VerdictName = "Mention ponctuelle"
+ANSWERED: VerdictName = "Réponse"
 
 ASSISTANT_MODEL_ENV = "TRANSCRIPTION_ASSISTANT_MODEL_DIR"
 ASSISTANT_DEVICE_ENV = "TRANSCRIPTION_ASSISTANT_DEVICE"
+ASSISTANT_MODEL_REPOSITORY = "OpenVINO/Qwen3-8B-int4-ov"
+ASSISTANT_MODEL_REVISION = "5c47abf4b8e12ebe8e99745bb0c1ec17e0c0abcc"
+ASSISTANT_MODEL_NAME = "qwen3-8b-int4-ov"
+DEFAULT_ASSISTANT_MODEL_DIR = (
+    APP_DATA_ROOT / "modeles" / "assistant" / ASSISTANT_MODEL_NAME
+)
+BUNDLED_ASSISTANT_MODEL_DIR = (
+    RESOURCE_ROOT / "modeles" / "assistant" / ASSISTANT_MODEL_NAME
+)
+ASSISTANT_REQUIRED_MODEL_FILES = (
+    "config.json",
+    "chat_template.jinja",
+    "openvino_config.json",
+    "openvino_detokenizer.xml",
+    "openvino_detokenizer.bin",
+    "openvino_model.xml",
+    "openvino_model.bin",
+    "openvino_tokenizer.xml",
+    "openvino_tokenizer.bin",
+    "tokenizer.json",
+    "tokenizer_config.json",
+)
+_CLAIM_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "verdict": {
+            "type": "string",
+            "enum": [
+                "Confirmé",
+                "Partiel",
+                "Contredit",
+                "Non retrouvé",
+                "À clarifier",
+            ],
+        },
+        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+        "citation_ids": {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": 6,
+        },
+    },
+    "required": ["verdict", "confidence", "citation_ids"],
+    "additionalProperties": False,
+}
+_CONSULTATION_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": [
+                "answered",
+                "partial",
+                "insufficient",
+                "clarify",
+                "confirmed",
+                "contradicted",
+                "topic_primary",
+                "topic_present",
+                "topic_mentioned",
+            ],
+        },
+        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+        "answer": {"type": "string"},
+        "key_points": {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": 5,
+        },
+        "nuance": {"type": "string"},
+        "citation_ids": {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": 6,
+        },
+    },
+    "required": [
+        "status",
+        "confidence",
+        "answer",
+        "key_points",
+        "nuance",
+        "citation_ids",
+    ],
+    "additionalProperties": False,
+}
+_DEFAULT_REASONER_CACHE: dict[
+    tuple[str, str, str, str], ConsultationReasoner | ClaimReasoner
+] = {}
 
 
 @dataclass(slots=True, frozen=True)
@@ -140,6 +254,29 @@ class ReasonerDecision:
     citation_ids: tuple[str, ...] = ()
 
 
+@dataclass(slots=True, frozen=True)
+class ConsultationRequest:
+    """Question libre et transcription bornée transmise au modèle local."""
+
+    question: str
+    intent: QueryIntent
+    candidates: tuple[Citation, ...]
+    role_mapping_confirmed: bool
+    audio_observations: Mapping[str, object] | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class ConsultationDecision:
+    """Réponse détaillée d'un modèle local, toujours reliée à des passages."""
+
+    status: str
+    confidence: float
+    answer: str
+    citation_ids: tuple[str, ...] = ()
+    key_points: tuple[str, ...] = ()
+    nuance: str = ""
+
+
 @runtime_checkable
 class ClaimReasoner(Protocol):
     """Contrat léger pour un backend local, sans dépendance imposée."""
@@ -148,6 +285,16 @@ class ClaimReasoner(Protocol):
         self, request: ReasonerRequest
     ) -> ReasonerDecision | Mapping[str, object] | str:
         """Retourne une décision structurée ou son JSON équivalent."""
+
+
+@runtime_checkable
+class ConsultationReasoner(Protocol):
+    """Contrat d'un assistant local capable de répondre à une question libre."""
+
+    def answer(
+        self, request: ConsultationRequest
+    ) -> ConsultationDecision | Mapping[str, object] | str:
+        """Retourne une réponse détaillée avec identifiants de citations."""
 
 
 class OpenVINOJsonReasoner:
@@ -166,7 +313,7 @@ class OpenVINOJsonReasoner:
         model_path: str | Path,
         *,
         device: str = "GPU",
-        max_new_tokens: int = 256,
+        max_new_tokens: int = 512,
         pipeline_factory: Callable[[str, str], object] | None = None,
     ) -> None:
         path = Path(model_path).expanduser().resolve()
@@ -177,48 +324,164 @@ class OpenVINOJsonReasoner:
         self.max_new_tokens = max(64, int(max_new_tokens))
         self._pipeline_factory = pipeline_factory
         self._pipeline: object | None = None
+        self._active_device: str | None = None
+        self._fallback_reason: str | None = None
 
     @property
     def loaded(self) -> bool:
         return self._pipeline is not None
 
+    @property
+    def active_device(self) -> str | None:
+        """Périphérique réellement utilisé après l'éventuel repli."""
+
+        return self._active_device
+
+    @property
+    def fallback_used(self) -> bool:
+        return self._active_device == "CPU" and self.device != "CPU"
+
+    @property
+    def fallback_reason(self) -> str | None:
+        return self._fallback_reason
+
+    def _resolve_pipeline_factory(self) -> Callable[[str, str], object]:
+        if self._pipeline_factory is not None:
+            return self._pipeline_factory
+        try:
+            import openvino_genai
+        except ImportError as exc:  # pragma: no cover - installation optionnelle
+            raise RuntimeError(
+                "Le runtime OpenVINO GenAI n'est pas installé."
+            ) from exc
+        return openvino_genai.LLMPipeline
+
+    @staticmethod
+    def _failure_summary(exc: Exception) -> str:
+        detail = re.sub(r"\s+", " ", str(exc)).strip()
+        return f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
+
+    def _create_pipeline(
+        self,
+        factory: Callable[[str, str], object],
+        device: str,
+    ) -> object:
+        return factory(str(self.model_path), device)
+
     def _load_pipeline(self) -> object:
         if self._pipeline is not None:
             return self._pipeline
-        if self._pipeline_factory is not None:
-            factory = self._pipeline_factory
+
+        factory = self._resolve_pipeline_factory()
+        try:
+            pipeline = self._create_pipeline(factory, self.device)
+        except Exception as primary_error:
+            if self.device == "CPU":
+                raise
+            self._fallback_reason = self._failure_summary(primary_error)
+            try:
+                pipeline = self._create_pipeline(factory, "CPU")
+            except Exception as cpu_error:
+                raise RuntimeError(
+                    "L'assistant OpenVINO n'a pu démarrer ni sur "
+                    f"{self.device} ({self._failure_summary(primary_error)}), "
+                    f"ni sur CPU ({self._failure_summary(cpu_error)})."
+                ) from cpu_error
+            self._active_device = "CPU"
         else:
+            self._active_device = self.device
+        self._pipeline = pipeline
+        return pipeline
+
+    def _generate_raw(
+        self,
+        pipeline: object,
+        prompt: str,
+        *,
+        json_schema: Mapping[str, object],
+    ) -> object:
+        chat_started = False
+        try:
             try:
                 import openvino_genai
-            except ImportError as exc:  # pragma: no cover - installation optionnelle
-                raise RuntimeError(
-                    "Le runtime OpenVINO GenAI n'est pas installé."
-                ) from exc
-            factory = openvino_genai.LLMPipeline
-        self._pipeline = factory(str(self.model_path), self.device)
-        return self._pipeline
 
-    def decide(self, request: ReasonerRequest) -> str:
-        pipeline = self._load_pipeline()
-        prompt = build_grounded_prompt(request)
-        try:
-            raw = pipeline.generate(
-                prompt,
+                structured = openvino_genai.StructuredOutputConfig(
+                    json_schema=json.dumps(
+                        json_schema,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                )
+                config = openvino_genai.GenerationConfig(
+                    max_new_tokens=self.max_new_tokens,
+                    do_sample=False,
+                    structured_output_config=structured,
+                )
+            except (ImportError, AttributeError, TypeError):
+                config = None
+
+            start_chat = getattr(pipeline, "start_chat", None)
+            if callable(start_chat):
+                start_chat(
+                    "Tu es l'assistant local de Studio Audio. Réponds "
+                    "uniquement avec l'objet JSON demandé."
+                )
+                chat_started = True
+            prompt_without_thinking = f"{prompt}\n/no_think"
+            if config is not None:
+                try:
+                    return pipeline.generate(
+                        prompt_without_thinking,
+                        generation_config=config,
+                    )
+                except TypeError:
+                    return pipeline.generate(prompt_without_thinking, config)
+            return pipeline.generate(
+                prompt_without_thinking,
                 max_new_tokens=self.max_new_tokens,
                 do_sample=False,
             )
-        except TypeError:  # Compatibilité avec les runtimes à config positionnelle.
-            try:
-                import openvino_genai
+        finally:
+            if chat_started:
+                finish_chat = getattr(pipeline, "finish_chat", None)
+                if callable(finish_chat):
+                    finish_chat()
 
-                config = openvino_genai.GenerationConfig()
-                config.max_new_tokens = self.max_new_tokens
-                config.do_sample = False
-                raw = pipeline.generate(prompt, config)
-            except (ImportError, AttributeError) as exc:
+    def _generate_json(
+        self,
+        prompt: str,
+        *,
+        json_schema: Mapping[str, object],
+    ) -> str:
+        pipeline = self._load_pipeline()
+        try:
+            raw = self._generate_raw(
+                pipeline,
+                prompt,
+                json_schema=json_schema,
+            )
+        except Exception as primary_error:
+            if self._active_device == "CPU" or self.device == "CPU":
+                raise
+            self._fallback_reason = self._failure_summary(primary_error)
+            self._pipeline = None
+            factory = self._resolve_pipeline_factory()
+            try:
+                cpu_pipeline = self._create_pipeline(factory, "CPU")
+                raw = self._generate_raw(
+                    cpu_pipeline,
+                    prompt,
+                    json_schema=json_schema,
+                )
+            except Exception as cpu_error:
+                self._active_device = None
                 raise RuntimeError(
-                    "Version OpenVINO GenAI incompatible avec l'assistant."
-                ) from exc
+                    "L'assistant OpenVINO a échoué pendant l'inférence sur "
+                    f"{self.device} ({self._failure_summary(primary_error)}) "
+                    f"puis sur CPU ({self._failure_summary(cpu_error)})."
+                ) from cpu_error
+            self._pipeline = cpu_pipeline
+            self._active_device = "CPU"
         if isinstance(raw, str):
             rendered = raw
         elif hasattr(raw, "texts") and getattr(raw, "texts"):
@@ -232,12 +495,26 @@ class OpenVINOJsonReasoner:
         match = re.search(r"\{.*\}", rendered, re.DOTALL)
         return match.group(0) if match else rendered
 
+    def decide(self, request: ReasonerRequest) -> str:
+        return self._generate_json(
+            build_grounded_prompt(request),
+            json_schema=_CLAIM_JSON_SCHEMA,
+        )
+
+    def answer(self, request: ConsultationRequest) -> str:
+        return self._generate_json(
+            build_consultation_prompt(request),
+            json_schema=_CONSULTATION_JSON_SCHEMA,
+        )
+
 
 def get_default_reasoner(
     model_path: str | Path | None = None,
     *,
     device: str | None = None,
-) -> OpenVINOJsonReasoner | None:
+    platform_name: str | None = None,
+    machine_name: str | None = None,
+) -> ConsultationReasoner | ClaimReasoner | None:
     """Retourne le backend local configuré, sinon ``None`` immédiatement.
 
     Le chemin peut être fourni explicitement ou via
@@ -246,15 +523,117 @@ def get_default_reasoner(
     le moteur déterministe probant.
     """
 
-    configured = str(model_path or os.environ.get(ASSISTANT_MODEL_ENV, "")).strip()
-    if not configured:
+    current_platform = sys.platform if platform_name is None else platform_name
+    current_machine = (
+        platform.machine() if machine_name is None else machine_name
+    ).lower()
+    if current_platform == "darwin":
+        if current_machine not in {"arm64", "aarch64"}:
+            return None
+        # Import tardif : Windows ne dépend jamais de MLX, et ce module peut
+        # réutiliser le contrat/prompt défini plus haut sans import circulaire.
+        from .mlx_assistant_backend import create_default_mlx_reasoner
+
+        reasoner = create_default_mlx_reasoner(model_path)
+        if reasoner is None:
+            return None
+        cache_key = (
+            current_platform,
+            current_machine,
+            str(getattr(reasoner, "model_path", model_path or "default")),
+            "MLX",
+        )
+        cached = _DEFAULT_REASONER_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+        _DEFAULT_REASONER_CACHE[cache_key] = reasoner
+        return reasoner
+
+    path = resolve_openvino_assistant_model_path(model_path)
+    if (
+        path is None
+        or importlib.util.find_spec("openvino_genai") is None
+    ):
         return None
-    path = Path(configured).expanduser()
-    if not path.is_dir() or importlib.util.find_spec("openvino_genai") is None:
-        return None
-    return OpenVINOJsonReasoner(
+    resolved_device = device or os.environ.get(ASSISTANT_DEVICE_ENV, "GPU")
+    cache_key = (
+        current_platform,
+        current_machine,
+        str(path),
+        str(resolved_device).upper(),
+    )
+    cached = _DEFAULT_REASONER_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    reasoner = OpenVINOJsonReasoner(
         path,
-        device=device or os.environ.get(ASSISTANT_DEVICE_ENV, "GPU"),
+        device=resolved_device,
+    )
+    _DEFAULT_REASONER_CACHE[cache_key] = reasoner
+    return reasoner
+
+
+def release_default_reasoners() -> None:
+    """Libère les modèles conversationnels mis en cache.
+
+    Ce point d'extension permet au traitement audio de récupérer la mémoire GPU
+    ou unifiée avant une nouvelle transcription longue.
+    """
+
+    _DEFAULT_REASONER_CACHE.clear()
+
+
+def resolve_openvino_assistant_model_path(
+    model_path: str | Path | None = None,
+    *,
+    environ: Mapping[str, str] | None = None,
+    app_data_root: Path = APP_DATA_ROOT,
+    resource_root: Path = RESOURCE_ROOT,
+) -> Path | None:
+    """Résout le Qwen OpenVINO local sans jamais déclencher de téléchargement.
+
+    L'installateur complet place le modèle dans les ressources en lecture seule.
+    Les anciennes installations qui l'ont déjà téléchargé continuent d'utiliser
+    leur copie durable dans les données utilisateur.
+    """
+
+    environment = os.environ if environ is None else environ
+
+    def complete(candidate: Path) -> bool:
+        return candidate.is_dir() and all(
+            (candidate / name).is_file()
+            for name in ASSISTANT_REQUIRED_MODEL_FILES
+        )
+
+    # Un chemin passé par l'appelant est une contrainte explicite : ne jamais
+    # le remplacer silencieusement par un autre modèle s'il est invalide.
+    if model_path is not None:
+        configured = str(model_path).strip()
+        if not configured:
+            return None
+        candidate = Path(configured).expanduser().resolve()
+        return candidate if complete(candidate) else None
+
+    # La variable d'environnement peut survivre à une ancienne installation.
+    # Si sa cible n'existe plus, poursuivre vers les ressources embarquées au
+    # lieu de désactiver l'assistant livré par le nouvel installateur.
+    configured = str(environment.get(ASSISTANT_MODEL_ENV, "")).strip()
+    if configured:
+        candidate = Path(configured).expanduser().resolve()
+        if complete(candidate):
+            return candidate
+
+    candidates = (
+        Path(resource_root) / "modeles" / "assistant" / ASSISTANT_MODEL_NAME,
+        Path(app_data_root) / "modeles" / "assistant" / ASSISTANT_MODEL_NAME,
+    )
+    return next(
+        (
+            candidate.resolve()
+            for candidate in candidates
+            if complete(candidate)
+        ),
+        None,
     )
 
 
@@ -264,6 +643,7 @@ class VerificationResult:
 
     question: str
     claim: str
+    intent: QueryIntent
     target_role: RoleName | None
     verdict: VerdictName
     confidence: float
@@ -281,6 +661,9 @@ class VerificationResult:
         return {
             "question": self.question,
             "claim": self.claim,
+            "intent": self.intent,
+            "answer_type": self.intent,
+            "engine_version": 2,
             "target_role": self.target_role,
             "verdict": self.verdict,
             "confidence": self.confidence,
@@ -497,6 +880,124 @@ _RELATION_END_PHRASES = (
     r"\bse\s+laiss(?:e|ent|er)\s+partir\b",
     r"\bchacun\s+de\s+son\s+cote\b",
     r"\bpas\s+de\s+reprise\s+de\s+relation",
+)
+
+
+@dataclass(slots=True, frozen=True)
+class _TopicDefinition:
+    key: str
+    label: str
+    patterns: tuple[str, ...]
+
+
+@dataclass(slots=True, frozen=True)
+class _TopicHit:
+    turn: _Turn
+    role: RoleName
+    score: float
+    matched_patterns: tuple[str, ...]
+
+
+@dataclass(slots=True, frozen=True)
+class _TopicAnalysis:
+    definition: _TopicDefinition
+    hits: tuple[_TopicHit, ...]
+    score: float
+    coverage: float
+
+
+_TOPIC_DEFINITIONS: tuple[_TopicDefinition, ...] = (
+    _TopicDefinition(
+        "sentimental",
+        "la vie sentimentale et les relations",
+        (
+            r"\bsentiment\w*\b",
+            r"\bamour\w*\b",
+            r"\bamoureu\w*\b",
+            r"\brelation\w*\b",
+            r"\bcouple\w*\b",
+            r"\bconjoint\w*\b",
+            r"\bcompagnon\w*\b",
+            r"\bpartenaire\w*\b",
+            r"\blien\b",
+            r"\bruptur\w*\b",
+            r"\bsepar\w*\b",
+            r"\brapproch\w*\b",
+            r"\brenouveau\w*\b",
+            r"\bstabilis\w*\b",
+        ),
+    ),
+    _TopicDefinition(
+        "travail",
+        "le travail et la carrière",
+        (
+            r"\btravail\w*\b",
+            r"\bemploi\w*\b",
+            r"\bprofession\w*\b",
+            r"\bcarriere\w*\b",
+            r"\bposte\w*\b",
+            r"\bentretien\w*\b",
+            r"\bembauch\w*\b",
+        ),
+    ),
+    _TopicDefinition(
+        "famille",
+        "la famille",
+        (
+            r"\bfamill\w*\b",
+            r"\benfant\w*\b",
+            r"\bfils\b",
+            r"\bfille\w*\b",
+            r"\bmere\b",
+            r"\bpere\b",
+            r"\bgrossess\w*\b",
+        ),
+    ),
+    _TopicDefinition(
+        "sante",
+        "la santé et le bien-être",
+        (
+            r"\bsante\b",
+            r"\bmaladi\w*\b",
+            r"\bmedical\w*\b",
+            r"\bmedecin\w*\b",
+            r"\bsoin\w*\b",
+            r"\bbien etre\b",
+        ),
+    ),
+    _TopicDefinition(
+        "finance",
+        "l'argent et les finances",
+        (
+            r"\bargent\b",
+            r"\bfinanc\w*\b",
+            r"\bsalair\w*\b",
+            r"\bdette\w*\b",
+            r"\bcredit\w*\b",
+            r"\bbudget\w*\b",
+        ),
+    ),
+    _TopicDefinition(
+        "voyage",
+        "les voyages et les vacances",
+        (
+            r"\bvoyag\w*\b",
+            r"\bvacanc\w*\b",
+            r"\bdeplac\w*\b",
+            r"\bweek end\b",
+        ),
+    ),
+    _TopicDefinition(
+        "logement",
+        "le logement et l'immobilier",
+        (
+            r"\blogement\w*\b",
+            r"\bimmobili\w*\b",
+            r"\bmaison\w*\b",
+            r"\bappartement\w*\b",
+            r"\bdemenag\w*\b",
+        ),
+    ),
 )
 
 
@@ -728,6 +1229,356 @@ def propose_speaker_roles(
         needs_confirmation=(not valid_pair or confidence < confirmation_threshold),
         method=method,
     )
+
+
+def classify_query_intent(question: str) -> QueryIntent:
+    """Distingue une synthèse, une recherche de thème et une affirmation.
+
+    Cette étape est volontairement déterministe : elle évite qu'une question
+    ouverte soit transformée en proposition vrai/faux avant même la recherche
+    de passages.
+    """
+
+    value = str(question or "").strip()
+    if not value:
+        raise ValueError("La question ne peut pas être vide.")
+    folded = _fold(value)
+    summary_patterns = (
+        r"\bde quoi (?:parle|traite)\b",
+        r"\b(?:quel|quels) (?:est|sont) (?:le |les )?(?:sujet|theme)s?\b",
+        r"\b(?:sujet|theme)s? principa\w*\b",
+        r"\b(?:resume|resumer|resumee|synthese)\b",
+        r"\b(?:parle|traite) de quoi principa\w*\b",
+        r"\bquoi principa\w*\b",
+    )
+    if any(re.search(pattern, folded) for pattern in summary_patterns):
+        return OPEN_SUMMARY
+
+    topic_patterns = (
+        r"\b(?:est ce que|cela|ca|conversation|consultation|audio|echange)\b"
+        r".{0,35}\b(?:parle|traite|porte|aborde)\b.{0,18}\b(?:de|du|des|sur)\b",
+        r"\b(?:parle|traite|porte|aborde)\b.{0,18}\b(?:de|du|des|sur)\b",
+        r"\b(?:theme|sujet)\b.{0,18}\b(?:present|aborde|evoque|mentionne)\b",
+        r"\by a t il\b.{0,18}\b(?:de|du|des)\b",
+    )
+    if any(re.search(pattern, folded) for pattern in topic_patterns):
+        return TOPIC_PRESENCE
+    claim_patterns = (
+        r"\b(?:master|voyant\w*|medium|client\w*)\b.{0,28}"
+        r"\b(?:dit|annonce|affirme|explique|prevoit|confirme|voit|pense)\b",
+        r"\b(?:a|aurait|avait)\s+(?:dit|annonce|affirme|explique|prevu|confirme)\b",
+        r"\b(?:est ce vrai|est ce confirme|confirme dans l audio)\b",
+        r"\b(?:est ce que|pensez vous que)\b.{0,80}"
+        r"\b(?:va|vont|sera|seront|aura|auront|fera|feront|reviendra|terminera)\b",
+    )
+    if (
+        any(re.search(pattern, folded) for pattern in claim_patterns)
+        or bool(re.search(r"[«“\"].{3,}[»”\"]", value))
+    ):
+        return CLAIM_VERIFICATION
+    return CONSULTATION_QA
+
+
+def _topic_matches(definition: _TopicDefinition, value: str) -> tuple[str, ...]:
+    folded = _fold(value)
+    return tuple(
+        pattern for pattern in definition.patterns if re.search(pattern, folded)
+    )
+
+
+def _analyse_topics(
+    records: Sequence[_Turn],
+    roles: RoleProposal,
+) -> tuple[_TopicAnalysis, ...]:
+    analyses: list[_TopicAnalysis] = []
+    for definition in _TOPIC_DEFINITIONS:
+        hits: list[_TopicHit] = []
+        for turn in records:
+            matches = _topic_matches(definition, turn.text)
+            if not matches:
+                continue
+            duration = max(0.0, turn.end - turn.start)
+            score = (
+                1.0
+                + 0.42 * min(4, len(matches) - 1)
+                + 0.18 * min(1.0, duration / 35.0)
+            )
+            role = roles.role_for(turn.speaker_id)
+            if role == "Master":
+                score += 0.08
+            hits.append(
+                _TopicHit(
+                    turn=turn,
+                    role=role,
+                    score=score,
+                    matched_patterns=matches,
+                )
+            )
+        total_score = sum(item.score for item in hits)
+        analyses.append(
+            _TopicAnalysis(
+                definition=definition,
+                hits=tuple(hits),
+                score=total_score,
+                coverage=len(hits) / max(1, len(records)),
+            )
+        )
+    return tuple(
+        sorted(
+            analyses,
+            key=lambda item: (-item.score, -len(item.hits), item.definition.key),
+        )
+    )
+
+
+def _extract_topic_phrase(question: str) -> str:
+    value = re.sub(r"\s+", " ", str(question or "")).strip(" .?!")
+    patterns = (
+        r"(?is)^.*?\b(?:parle|parler|traite|traiter|porte|porter|aborde|aborder)"
+        r"\s+(?:principalement\s+)?(?:de|du|des|sur)\s+(.+)$",
+        r"(?is)^.*?\b(?:theme|sujet)\s+(.+?)\s+"
+        r"(?:est|soit|serait)\s+(?:present|aborde|evoque|mentionne).*$",
+        r"(?is)^.*?\by\s+a[- ]t[- ]il\s+(?:de|du|des)\s+(.+)$",
+    )
+    for pattern in patterns:
+        match = re.match(pattern, value)
+        if match:
+            topic = match.group(1).strip(" .?!:;,-")
+            topic = re.sub(
+                r"(?is)\s+(?:dans|pendant|au cours de)\s+"
+                r"(?:la|cette)?\s*(?:consultation|conversation|audio).*$",
+                "",
+                topic,
+            ).strip(" .?!:;,-")
+            if topic:
+                return topic
+    return value
+
+
+def _requested_topic_definitions(question: str) -> tuple[_TopicDefinition, ...]:
+    phrase = _extract_topic_phrase(question)
+    requested = tuple(
+        definition
+        for definition in _TOPIC_DEFINITIONS
+        if _topic_matches(definition, phrase)
+    )
+    return requested
+
+
+def _topic_excerpt(text: str, definition: _TopicDefinition) -> str:
+    candidates: list[tuple[int, int, str]] = []
+    for window in _text_windows(text):
+        match_count = len(_topic_matches(definition, window))
+        if match_count:
+            candidates.append((match_count, -len(window.split()), window.strip()))
+    if not candidates:
+        return str(text or "").strip()
+    return max(candidates, key=lambda item: (item[0], item[1]))[2]
+
+
+def _topic_citation(item: _TopicHit, definition: _TopicDefinition) -> Citation:
+    turn = item.turn
+    return Citation(
+        id=f"turn-{turn.index:05d}",
+        turn_index=turn.index,
+        start=turn.start,
+        end=turn.end,
+        speaker_id=turn.speaker_id,
+        speaker=turn.speaker,
+        role=item.role,
+        text=turn.text,
+        relevance=round(min(1.0, item.score / 2.4), 4),
+        excerpt=_topic_excerpt(turn.text, definition),
+    )
+
+
+def _representative_topic_hits(
+    analysis: _TopicAnalysis,
+    *,
+    limit: int = 3,
+) -> tuple[_TopicHit, ...]:
+    if not analysis.hits or limit < 1:
+        return ()
+    chronological = sorted(
+        analysis.hits,
+        key=lambda item: (item.turn.start, item.turn.index),
+    )
+    selected: list[_TopicHit] = []
+
+    # Le premier tour du Client explique souvent la raison de l'appel.
+    client_hit = next((item for item in chronological if item.role == "Client"), None)
+    if client_hit is not None:
+        selected.append(client_hit)
+
+    master_hits = [item for item in chronological if item.role == "Master"]
+    duration = max(item.turn.end for item in chronological)
+    for lower, upper in ((0.0, 0.55), (0.45, 1.01)):
+        bucket = [
+            item
+            for item in master_hits
+            if duration * lower <= item.turn.start < duration * upper
+            and item not in selected
+        ]
+        if bucket:
+            selected.append(
+                max(
+                    bucket,
+                    key=lambda item: (
+                        item.score,
+                        len(item.matched_patterns),
+                        -item.turn.start,
+                    ),
+                )
+            )
+        if len(selected) >= limit:
+            break
+
+    for item in sorted(
+        chronological,
+        key=lambda value: (-value.score, value.turn.start),
+    ):
+        if item not in selected:
+            selected.append(item)
+        if len(selected) >= limit:
+            break
+    return tuple(sorted(selected[:limit], key=lambda item: item.turn.start))
+
+
+_IGNORED_PROPER_NAMES = {
+    "allo",
+    "alors",
+    "apres",
+    "avant",
+    "bonjour",
+    "bonsoir",
+    "cedonc",
+    "client",
+    "cliente",
+    "daccord",
+    "donc",
+    "interlocuteur",
+    "master",
+    "merci",
+    "non",
+    "oui",
+    "voila",
+}
+
+
+def _proper_names(value: str) -> tuple[str, ...]:
+    names: list[str] = []
+    for match in re.finditer(
+        r"(?<![A-Za-zÀ-ÖØ-öø-ÿ'’\-])"
+        r"([A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’\-]{2,})",
+        str(value or ""),
+    ):
+        name = match.group(1).strip(" .'’-")
+        if _fold(name) not in _IGNORED_PROPER_NAMES:
+            names.append(name)
+    return tuple(names)
+
+
+def _relationship_people(
+    records: Sequence[_Turn],
+    roles: RoleProposal,
+) -> tuple[str | None, str | None]:
+    client_names: set[str] = set()
+    target: str | None = None
+    counts: dict[str, tuple[str, int]] = {}
+
+    for turn in records:
+        if roles.role_for(turn.speaker_id) == "Client":
+            intro = re.search(
+                r"\b(?:je suis|je m['’]appelle)\s+"
+                r"([A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’\-]{2,})",
+                turn.text,
+            )
+            if intro:
+                client_names.add(_fold(intro.group(1)))
+            if target is None and re.search(
+                r"\b(?:sentiment\w*|amour\w*|relation\w*|lien)\b",
+                _fold(turn.text),
+            ):
+                match = re.search(
+                    r"\b(?:avec|entre)\s+"
+                    r"([A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’\-]{2,})",
+                    turn.text,
+                )
+                if match:
+                    target = match.group(1)
+        for name in _proper_names(turn.text):
+            key = _fold(name)
+            if key in client_names:
+                continue
+            previous = counts.get(key)
+            counts[key] = (name, (previous[1] if previous else 0) + 1)
+
+    if target is None:
+        ranked = sorted(
+            counts.values(),
+            key=lambda item: (-item[1], _fold(item[0])),
+        )
+        target = ranked[0][0] if ranked and ranked[0][1] >= 2 else None
+    target_key = _fold(target or "")
+    third = next(
+        (
+            name
+            for name, count in sorted(
+                counts.values(),
+                key=lambda item: (-item[1], _fold(item[0])),
+            )
+            if count >= 2
+            and _fold(name) != target_key
+            and _fold(name) not in client_names
+        ),
+        None,
+    )
+    return target, third
+
+
+def _sentimental_overview(
+    records: Sequence[_Turn],
+    roles: RoleProposal,
+) -> str:
+    target, third = _relationship_people(records, roles)
+    combined = _fold(" ".join(turn.text for turn in records))
+    details: list[str] = []
+    if target and third:
+        details.append(
+            f"L'échange suit surtout l'évolution du lien entre la cliente et "
+            f"{target}, tandis que la relation entre {target} et {third} "
+            "constitue l'obstacle central."
+        )
+    elif target:
+        details.append(
+            f"La cliente cherche surtout à comprendre l'évolution de son lien "
+            f"avec {target}."
+        )
+    has_end = bool(
+        re.search(
+            r"\b(?:fin\w*|ruptur\w*|separ\w*|termin\w*|couper les ponts)\b",
+            combined,
+        )
+    )
+    has_renewal = bool(
+        re.search(r"\b(?:renouveau\w*|rapproch\w*|stabilis\w*|reprise)\b", combined)
+    )
+    if has_end and has_renewal and target and third:
+        details.append(
+            f"Les passages décrivent une fin progressive du lien {target}–{third} "
+            f"et un rapprochement ou une stabilisation possibles entre la cliente "
+            f"et {target}."
+        )
+    elif has_end and has_renewal:
+        details.append(
+            "Les passages abordent à la fois une séparation progressive et la "
+            "possibilité d'un rapprochement ou d'une stabilisation."
+        )
+    elif has_end:
+        details.append("Une séparation ou une fin de relation est largement évoquée.")
+    elif has_renewal:
+        details.append("Un rapprochement ou un renouveau du lien est évoqué.")
+    return " ".join(details)
 
 
 def extract_claim(question: str) -> str:
@@ -1262,6 +2113,75 @@ def build_grounded_prompt(request: ReasonerRequest) -> str:
     )
 
 
+def build_consultation_prompt(request: ConsultationRequest) -> str:
+    """Construit le contexte strict d'une question libre sur la consultation."""
+
+    passages = "\n".join(
+        (
+            f"[{item.id}] {_answer_timecode(item.start)}–"
+            f"{_answer_timecode(item.end)} | {item.role} | {item.text}"
+        )
+        for item in request.candidates
+    )
+    role_note = (
+        "L'attribution Client/Master est confirmée."
+        if request.role_mapping_confirmed
+        else (
+            "L'attribution Client/Master est provisoire : signale cette limite "
+            "si elle influence la réponse."
+        )
+    )
+    audio_context = (
+        json.dumps(
+            request.audio_observations,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        if request.audio_observations
+        else (
+            '{"available":false,"limitations":'
+            '"Aucune mesure acoustique fournie pour cette question."}'
+        )
+    )
+    return (
+        "Tu es l'assistant d'analyse d'une consultation téléphonique entre une "
+        "Cliente et un Master. Réponds en français, de manière précise, utile et "
+        "professionnelle.\n"
+        "RÈGLES ABSOLUES:\n"
+        "1. Utilise uniquement la transcription horodatée fournie. N'ajoute aucun "
+        "fait extérieur et n'invente aucune citation.\n"
+        "2. Réponds directement à la question, même si elle demande une synthèse, "
+        "une comparaison, une chronologie, les thèmes, les positions des personnes "
+        "ou l'évolution de l'échange.\n"
+        "3. Distingue ce qui est explicitement dit, ce qui est une inférence "
+        "prudente et ce qui ne peut pas être établi.\n"
+        "4. Pour le ton vocal, le volume, l'intonation ou une émotion acoustique, "
+        "la transcription seule ne suffit pas : tu peux analyser les mots, les "
+        "désaccords et la dynamique des tours, mais tu dois nommer cette limite.\n"
+        "5. Chaque conclusion factuelle doit être soutenue par un ou plusieurs "
+        "citation_ids existants. Si les preuves sont insuffisantes, utilise le "
+        "statut insufficient et ne force pas une réponse.\n"
+        "6. Ne juge jamais si une prédiction de voyance est vraie dans le monde "
+        "réel ; indique uniquement ce qui a été formulé dans la consultation.\n"
+        "7. Si la question demande quand, à quel moment ou une chronologie, "
+        "donne les timecodes utiles directement dans answer ou key_points et "
+        "distingue clairement les personnes ou relations concernées.\n\n"
+        "Réponds uniquement avec un objet JSON valide comportant exactement:\n"
+        '{\n  "status": "answered|partial|insufficient|clarify|confirmed|'
+        'contradicted|topic_primary|topic_present|topic_mentioned",\n'
+        '  "confidence": 0.0,\n'
+        '  "answer": "réponse complète en 2 à 6 phrases",\n'
+        '  "key_points": ["point précis 1", "point précis 2"],\n'
+        '  "nuance": "limite ou lecture prudente",\n'
+        '  "citation_ids": ["turn-00001"]\n}\n\n'
+        f"<intention>{request.intent}</intention>\n"
+        f"<question>{request.question}</question>\n"
+        f"<roles>{role_note}</roles>\n"
+        f"<mesures_audio>{audio_context}</mesures_audio>\n"
+        f"<transcription>\n{passages}\n</transcription>"
+    )
+
+
 def _coerce_verdict(value: object) -> VerdictName | None:
     folded = _fold(str(value or ""))
     aliases: dict[str, VerdictName] = {
@@ -1317,7 +2237,9 @@ def _parse_reasoner_decision(
         ids = tuple(str(item) for item in raw_ids)
     else:
         ids = ()
-    safe_ids = tuple(dict.fromkeys(item for item in ids if item in valid_ids))
+    safe_ids = tuple(
+        dict.fromkeys(item for item in ids if item in valid_ids)
+    )[:6]
     if verdict != NOT_FOUND and not safe_ids:
         # Décision non prouvée ou citation inventée : elle n'est jamais exposée.
         return None
@@ -1327,6 +2249,307 @@ def _parse_reasoner_decision(
         verdict=verdict,
         confidence=round(confidence, 3),
         citation_ids=safe_ids,
+    )
+
+
+def _model_context_citations(
+    records: Sequence[_Turn],
+    roles: RoleProposal,
+    question: str,
+    intent: QueryIntent,
+    *,
+    max_characters: int = 90_000,
+) -> tuple[Citation, ...]:
+    """Fournit le transcript complet tant qu'il tient dans le contexte.
+
+    Pour les consultations exceptionnellement longues, les passages les plus
+    proches sont combinés à un échantillon chronologique. Le modèle conserve
+    ainsi à la fois le contexte global et les preuves directement pertinentes.
+    """
+
+    all_citations = tuple(
+        Citation(
+            id=f"turn-{turn.index:05d}",
+            turn_index=turn.index,
+            start=turn.start,
+            end=turn.end,
+            speaker_id=turn.speaker_id,
+            speaker=turn.speaker,
+            role=roles.role_for(turn.speaker_id),
+            text=turn.text,
+            relevance=1.0,
+            excerpt=turn.text,
+        )
+        for turn in records
+    )
+    estimated = sum(len(item.text) + 80 for item in all_citations)
+    if estimated <= max_characters:
+        return all_citations
+
+    selected_indexes: set[int] = set()
+    sample_count = min(24, len(records))
+    if sample_count:
+        for sample_index in range(sample_count):
+            index = round(sample_index * (len(records) - 1) / max(1, sample_count - 1))
+            selected_indexes.add(index)
+
+    if intent != OPEN_SUMMARY:
+        query_for_retrieval = (
+            _extract_topic_phrase(question)
+            if intent == TOPIC_PRESENCE
+            else question
+        )
+        claim = extract_claim(query_for_retrieval)
+        ranked = sorted(
+            (
+                _score_turn(turn, claim, roles.role_for(turn.speaker_id))
+                for turn in records
+            ),
+            key=_scored_sort_key,
+        )
+        selected_indexes.update(item.turn.index for item in ranked[:24])
+
+    bounded: list[Citation] = []
+    used = 0
+    for index in sorted(selected_indexes):
+        citation = all_citations[index]
+        cost = len(citation.text) + 80
+        if bounded and used + cost > max_characters:
+            break
+        bounded.append(citation)
+        used += cost
+    return tuple(bounded)
+
+
+def _parse_consultation_decision(
+    value: ConsultationDecision | Mapping[str, object] | str,
+    *,
+    valid_ids: set[str],
+) -> ConsultationDecision | None:
+    if isinstance(value, ConsultationDecision):
+        raw_status: object = value.status
+        raw_confidence: object = value.confidence
+        raw_answer: object = value.answer
+        raw_ids: object = value.citation_ids
+        raw_points: object = value.key_points
+        raw_nuance: object = value.nuance
+    else:
+        raw: object = value
+        if isinstance(value, str):
+            try:
+                raw = json.loads(value)
+            except json.JSONDecodeError:
+                return None
+        if not isinstance(raw, Mapping):
+            return None
+        raw_status = raw.get("status", "answered")
+        raw_confidence = raw.get("confidence", 0.55)
+        raw_answer = raw.get("answer", "")
+        raw_ids = raw.get("citation_ids", [])
+        raw_points = raw.get("key_points", [])
+        raw_nuance = raw.get("nuance", "")
+
+    status = _fold(str(raw_status or "answered")).replace(" ", "_")
+    aliases = {
+        "reponse": "answered",
+        "answered": "answered",
+        "confirme": "confirmed",
+        "confirmed": "confirmed",
+        "contredit": "contradicted",
+        "contradicted": "contradicted",
+        "partiel": "partial",
+        "partial": "partial",
+        "insuffisant": "insufficient",
+        "insufficient": "insufficient",
+        "non_retrouve": "insufficient",
+        "clarifier": "clarify",
+        "a_clarifier": "clarify",
+        "topic_primary": "topic_primary",
+        "theme_principal": "topic_primary",
+        "topic_present": "topic_present",
+        "theme_present": "topic_present",
+        "topic_mentioned": "topic_mentioned",
+        "mention_ponctuelle": "topic_mentioned",
+    }
+    status = aliases.get(status, status)
+    if status not in {
+        "answered",
+        "confirmed",
+        "contradicted",
+        "partial",
+        "insufficient",
+        "clarify",
+        "topic_primary",
+        "topic_present",
+        "topic_mentioned",
+    }:
+        status = "answered"
+
+    answer = re.sub(r"\s+", " ", str(raw_answer or "")).strip()
+    nuance = re.sub(r"\s+", " ", str(raw_nuance or "")).strip()
+    try:
+        confidence = max(0.0, min(1.0, float(raw_confidence)))
+    except (TypeError, ValueError):
+        confidence = 0.55
+    if isinstance(raw_ids, str):
+        ids = (raw_ids,)
+    elif isinstance(raw_ids, Sequence):
+        ids = tuple(str(item) for item in raw_ids)
+    else:
+        ids = ()
+    safe_ids = tuple(
+        dict.fromkeys(item for item in ids if item in valid_ids)
+    )[:6]
+    if isinstance(raw_points, str):
+        points = (re.sub(r"\s+", " ", raw_points).strip(),)
+    elif isinstance(raw_points, Sequence):
+        points = tuple(
+            re.sub(r"\s+", " ", str(item)).strip()
+            for item in raw_points
+            if str(item).strip()
+        )
+    else:
+        points = ()
+
+    if not answer:
+        return None
+    if status not in {"insufficient", "clarify"} and not safe_ids:
+        # Une réponse factuelle sans passage réel n'est jamais affichée.
+        return None
+    return ConsultationDecision(
+        status=status,
+        confidence=round(confidence, 3),
+        answer=answer[:6000],
+        citation_ids=safe_ids,
+        key_points=points[:5],
+        nuance=nuance[:1800],
+    )
+
+
+def _model_verdict(intent: QueryIntent, status: str) -> VerdictName:
+    if intent == OPEN_SUMMARY:
+        return NOT_FOUND if status == "insufficient" else SUMMARY
+    if intent == TOPIC_PRESENCE:
+        return {
+            "topic_primary": TOPIC_PRIMARY,
+            "topic_present": TOPIC_PRESENT,
+            "topic_mentioned": TOPIC_MENTIONED,
+            "insufficient": NOT_FOUND,
+            "clarify": CLARIFY,
+        }.get(status, TOPIC_PRESENT)
+    if intent == CLAIM_VERIFICATION:
+        return {
+            "confirmed": CONFIRMED,
+            "contradicted": CONTRADICTED,
+            "partial": PARTIAL,
+            "insufficient": NOT_FOUND,
+            "clarify": CLARIFY,
+        }.get(status, PARTIAL)
+    return {
+        "partial": PARTIAL,
+        "insufficient": NOT_FOUND,
+        "clarify": CLARIFY,
+    }.get(status, ANSWERED)
+
+
+def _try_consultation_reasoner(
+    reasoner: object,
+    *,
+    records: Sequence[_Turn],
+    question: str,
+    intent: QueryIntent,
+    roles: RoleProposal,
+    audio_observations: Mapping[str, object] | None = None,
+) -> tuple[VerificationResult | None, str | None]:
+    answer_method = getattr(reasoner, "answer", None)
+    if not callable(answer_method):
+        return None, None
+    candidates = _model_context_citations(records, roles, question, intent)
+    candidate_by_id = {item.id: item for item in candidates}
+    request = ConsultationRequest(
+        question=question,
+        intent=intent,
+        candidates=candidates,
+        role_mapping_confirmed=not roles.needs_confirmation,
+        audio_observations=audio_observations,
+    )
+    try:
+        raw = answer_method(request)
+        decision = _parse_consultation_decision(
+            raw,
+            valid_ids=set(candidate_by_id),
+        )
+    except Exception as exc:  # pragma: no cover - dépend du runtime local
+        return (
+            None,
+            "Le modèle local polyvalent est indisponible ; l'analyse de secours "
+            f"a pris le relais ({type(exc).__name__}).",
+        )
+    if decision is None:
+        return (
+            None,
+            "La réponse du modèle local n'était pas suffisamment reliée aux "
+            "passages ; l'analyse de secours a pris le relais.",
+        )
+    citations = tuple(
+        candidate_by_id[citation_id]
+        for citation_id in decision.citation_ids
+        if citation_id in candidate_by_id
+    )
+    confidence_caps = {
+        "insufficient": 0.6,
+        "clarify": 0.65,
+        "partial": 0.78,
+        "contradicted": 0.9,
+        "confirmed": 0.9,
+        "topic_primary": 0.9,
+        "topic_present": 0.9,
+        "topic_mentioned": 0.85,
+        "answered": 0.9,
+    }
+    calibrated_confidence = min(
+        decision.confidence,
+        confidence_caps.get(decision.status, 0.85),
+    )
+    if (
+        isinstance(audio_observations, Mapping)
+        and audio_observations.get("available")
+    ):
+        # Les métriques acoustiques décrivent l'intensité, le débit et les
+        # alternances, mais ne prouvent jamais seules une émotion ou une
+        # intention. La confiance affichée doit refléter cette limite.
+        calibrated_confidence = min(calibrated_confidence, 0.82)
+    if roles.needs_confirmation:
+        calibrated_confidence = min(calibrated_confidence, 0.65)
+    nuance = decision.nuance or (
+        "La réponse porte uniquement sur le contenu de cette consultation."
+    )
+    if roles.needs_confirmation:
+        nuance += " L'attribution Client/Master doit encore être confirmée."
+    claim = (
+        _extract_topic_phrase(question)
+        if intent == TOPIC_PRESENCE
+        else (extract_claim(question) if intent == CLAIM_VERIFICATION else question)
+    )
+    return (
+        VerificationResult(
+            question=question,
+            claim=claim,
+            intent=intent,
+            target_role=(
+                _target_role(question) if intent == CLAIM_VERIFICATION else None
+            ),
+            verdict=_model_verdict(intent, decision.status),
+            confidence=round(calibrated_confidence, 3),
+            explanation=decision.answer,
+            citations=citations,
+            roles=roles,
+            backend=str(getattr(reasoner, "name", type(reasoner).__name__)),
+            answer=decision.answer,
+            analysis_points=decision.key_points,
+            nuance=nuance,
+        ),
+        None,
     )
 
 
@@ -1462,7 +2685,8 @@ def _evidence_insight(citation: Citation | Mapping[str, object]) -> str:
     start = _citation_field(citation, "start")
     if start is None:
         start = _citation_field(citation, "start_seconds")
-    prefix = f"À {_answer_timecode(start)}, le {role}"
+    role_subject = "la Cliente" if role == "Client" else f"le {role}"
+    prefix = f"À {_answer_timecode(start)}, {role_subject}"
 
     ideas: list[str] = []
     relation_polarity = _relation_end_polarity(text)
@@ -1612,6 +2836,491 @@ def build_answer_sections(
     return conclusion, points, nuance
 
 
+def _summary_result(
+    records: Sequence[_Turn],
+    question: str,
+    roles: RoleProposal,
+) -> VerificationResult:
+    analyses = _analyse_topics(records, roles)
+    primary = next((item for item in analyses if item.score > 0.0), None)
+    if primary is None:
+        return VerificationResult(
+            question=question,
+            claim=question,
+            intent=OPEN_SUMMARY,
+            target_role=None,
+            verdict=NOT_FOUND,
+            confidence=0.45,
+            explanation="Aucun thème dominant n'a pu être isolé dans la transcription.",
+            citations=(),
+            roles=roles,
+            backend="analyse-thématique-locale",
+            answer=(
+                "La transcription est exploitable, mais aucun thème suffisamment "
+                "récurrent ne permet d'en produire une synthèse fiable."
+            ),
+            nuance=(
+                "Cette absence de synthèse automatique ne signifie pas que l'audio "
+                "est vide ; une relecture de la transcription reste nécessaire."
+            ),
+        )
+
+    selected_hits = _representative_topic_hits(primary)
+    citations = tuple(
+        _topic_citation(item, primary.definition) for item in selected_hits
+    )
+    answer_parts = [
+        f"La consultation porte principalement sur {primary.definition.label}."
+    ]
+    if primary.definition.key == "sentimental":
+        overview = _sentimental_overview(records, roles)
+        if overview:
+            answer_parts.append(overview)
+
+    secondary = next(
+        (
+            item
+            for item in analyses
+            if item is not primary
+            and len(item.hits) >= 2
+            and item.score >= max(2.4, primary.score * 0.28)
+        ),
+        None,
+    )
+    if secondary is not None:
+        answer_parts.append(
+            f"Un sujet secondaire concerne {secondary.definition.label}."
+        )
+
+    total_topic_score = sum(item.score for item in analyses)
+    dominance = primary.score / max(primary.score, total_topic_score)
+    confidence = min(
+        0.94,
+        0.62 + 0.18 * min(1.0, primary.coverage / 0.25) + 0.14 * dominance,
+    )
+    points = tuple(_evidence_insight(citation) for citation in citations)
+    nuance = (
+        "Cette synthèse hiérarchise les thèmes réellement présents dans la "
+        "transcription. Elle restitue les propos tenus, sans garantir que les "
+        "prédictions évoquées se réaliseront."
+    )
+    if roles.needs_confirmation:
+        nuance += " L'attribution Client/Master doit encore être confirmée."
+    return VerificationResult(
+        question=question,
+        claim=question,
+        intent=OPEN_SUMMARY,
+        target_role=None,
+        verdict=SUMMARY,
+        confidence=round(confidence, 3),
+        explanation="Synthèse thématique de la consultation complète.",
+        citations=citations,
+        roles=roles,
+        backend="analyse-thématique-locale",
+        answer=" ".join(answer_parts),
+        analysis_points=points,
+        nuance=nuance,
+    )
+
+
+def _ad_hoc_topic_analysis(
+    records: Sequence[_Turn],
+    roles: RoleProposal,
+    phrase: str,
+) -> _TopicAnalysis:
+    tokens = tuple(dict.fromkeys(_tokens(phrase)))
+    definition = _TopicDefinition(
+        key="custom",
+        label=f"le thème « {phrase} »",
+        patterns=tuple(rf"\b{re.escape(token)}\w*\b" for token in tokens),
+    )
+    hits: list[_TopicHit] = []
+    for turn in records:
+        matches = _topic_matches(definition, turn.text)
+        if not matches:
+            continue
+        recall = len(matches) / max(1, len(definition.patterns))
+        if recall < (0.5 if len(definition.patterns) > 1 else 1.0):
+            continue
+        hits.append(
+            _TopicHit(
+                turn=turn,
+                role=roles.role_for(turn.speaker_id),
+                score=0.7 + 0.8 * recall,
+                matched_patterns=matches,
+            )
+        )
+    return _TopicAnalysis(
+        definition=definition,
+        hits=tuple(hits),
+        score=sum(item.score for item in hits),
+        coverage=len(hits) / max(1, len(records)),
+    )
+
+
+def _topic_presence_result(
+    records: Sequence[_Turn],
+    question: str,
+    roles: RoleProposal,
+) -> VerificationResult:
+    phrase = _extract_topic_phrase(question)
+    all_analyses = _analyse_topics(records, roles)
+    by_key = {item.definition.key: item for item in all_analyses}
+    requested_definitions = _requested_topic_definitions(question)
+    requested = tuple(
+        by_key[definition.key]
+        for definition in requested_definitions
+        if definition.key in by_key
+    )
+    if not requested:
+        requested = (_ad_hoc_topic_analysis(records, roles, phrase),)
+
+    matching = tuple(item for item in requested if item.hits)
+    top_overall = next((item for item in all_analyses if item.score > 0.0), None)
+    if not matching:
+        answer = (
+            f"Le thème « {phrase} » n'a pas été retrouvé de façon suffisamment "
+            "claire dans la transcription."
+        )
+        return VerificationResult(
+            question=question,
+            claim=phrase,
+            intent=TOPIC_PRESENCE,
+            target_role=None,
+            verdict=NOT_FOUND,
+            confidence=0.72,
+            explanation=answer,
+            citations=(),
+            roles=roles,
+            backend="analyse-thématique-locale",
+            answer=answer,
+            nuance=(
+                "Une formulation différente ou une erreur de transcription reste "
+                "possible. Cette absence ne constitue pas une preuve sur la réalité "
+                "extérieure."
+            ),
+        )
+
+    strongest = max(matching, key=lambda item: item.score)
+    is_primary = bool(
+        top_overall is not None
+        and strongest.definition.key == top_overall.definition.key
+        and (
+            strongest.coverage >= 0.14
+            or strongest.score >= max(4.5, top_overall.score * 0.72)
+        )
+    )
+    is_mentioned = bool(
+        not is_primary
+        and (
+            len(strongest.hits) == 1
+            or (
+                top_overall is not None
+                and strongest.score < max(2.5, top_overall.score * 0.24)
+            )
+        )
+    )
+    if is_primary:
+        verdict = TOPIC_PRIMARY
+        answer = (
+            f"Oui. Le thème « {phrase} » constitue le sujet principal de la "
+            "consultation."
+        )
+    elif is_mentioned:
+        verdict = TOPIC_MENTIONED
+        answer = (
+            f"Oui, mais de façon ponctuelle. Le thème « {phrase} » apparaît "
+            "surtout comme un élément de contexte, pas comme le sujet principal."
+        )
+    else:
+        verdict = TOPIC_PRESENT
+        answer = (
+            f"Oui. Le thème « {phrase} » est bien abordé dans la consultation, "
+            "sans être son sujet principal."
+        )
+
+    if strongest.definition.key == "sentimental":
+        overview = _sentimental_overview(records, roles)
+        if overview:
+            answer += " " + overview
+
+    selected_hits = _representative_topic_hits(strongest)
+    citations = tuple(
+        _topic_citation(item, strongest.definition) for item in selected_hits
+    )
+    points = tuple(_evidence_insight(citation) for citation in citations)
+    relative_score = (
+        strongest.score / max(strongest.score, top_overall.score)
+        if top_overall is not None
+        else 1.0
+    )
+    confidence = min(
+        0.96,
+        0.66
+        + 0.18 * min(1.0, strongest.coverage / 0.20)
+        + 0.10 * relative_score,
+    )
+    nuance = (
+        "La réponse indique si le thème est présent et quelle place il occupe "
+        "dans l'échange. Une phrase négative sur ce thème compte comme une "
+        "mention du thème, pas comme son absence."
+    )
+    if roles.needs_confirmation:
+        nuance += " L'attribution Client/Master doit encore être confirmée."
+    return VerificationResult(
+        question=question,
+        claim=phrase,
+        intent=TOPIC_PRESENCE,
+        target_role=None,
+        verdict=verdict,
+        confidence=round(confidence, 3),
+        explanation=answer,
+        citations=citations,
+        roles=roles,
+        backend="analyse-thématique-locale",
+        answer=answer,
+        analysis_points=points,
+        nuance=nuance,
+    )
+
+
+def _general_fallback_result(
+    records: Sequence[_Turn],
+    question: str,
+    roles: RoleProposal,
+    audio_observations: Mapping[str, object] | None = None,
+) -> VerificationResult:
+    """Réponse prudente lorsque le modèle polyvalent n'est pas disponible."""
+
+    folded = _fold(question)
+    tone_question = bool(
+        re.search(
+            r"\b(?:ton|voix|monte|degener\w*|tension|disput\w*|"
+            r"agress\w*|coler\w*|enerve\w*)\b",
+            folded,
+        )
+    )
+    if tone_question:
+        acoustic_available = bool(
+            isinstance(audio_observations, Mapping)
+            and audio_observations.get("available")
+        )
+        signal_pattern = re.compile(
+            r"\b(?:hors de question|conflit\w*|disput\w*|agress\w*|"
+            r"coler\w*|enerve\w*|marre|insult\w*|cri\w*|atroce|"
+            r"cingl\w*|tension\w*)\b"
+        )
+        signal_turns = [
+            turn for turn in records if signal_pattern.search(_fold(turn.text))
+        ]
+        if acoustic_available:
+            by_id = {f"turn-{turn.index:05d}": turn for turn in records}
+            for group_name in ("loudest_turns", "fastest_turns"):
+                raw_group = audio_observations.get(group_name)
+                if not isinstance(raw_group, Sequence):
+                    continue
+                for metric in raw_group[:3]:
+                    if not isinstance(metric, Mapping):
+                        continue
+                    turn = by_id.get(str(metric.get("turn_id") or ""))
+                    if turn is not None and turn not in signal_turns:
+                        signal_turns.append(turn)
+        citations = tuple(
+            Citation(
+                id=f"turn-{turn.index:05d}",
+                turn_index=turn.index,
+                start=turn.start,
+                end=turn.end,
+                speaker_id=turn.speaker_id,
+                speaker=turn.speaker,
+                role=roles.role_for(turn.speaker_id),
+                text=turn.text,
+                relevance=0.7,
+                excerpt=turn.text,
+            )
+            for turn in signal_turns[:3]
+        )
+        if acoustic_available:
+            change = float(audio_observations.get("loudness_change_db") or 0.0)
+            assessment = str(audio_observations.get("assessment") or "")
+            rapid = int(audio_observations.get("rapid_alternation_count") or 0)
+            overlaps = int(audio_observations.get("overlap_count") or 0)
+            if assessment == "rising":
+                opening = (
+                    f"Les mesures montrent une hausse globale d'intensité "
+                    f"d'environ {change:.1f} dB entre le début et la fin."
+                )
+            elif assessment == "falling":
+                opening = (
+                    f"Les mesures ne montrent pas une montée globale : l'intensité "
+                    f"baisse d'environ {abs(change):.1f} dB."
+                )
+            else:
+                opening = (
+                    f"Les mesures ne montrent pas de hausse globale nette de "
+                    f"l'intensité ({change:+.1f} dB)."
+                )
+            answer = (
+                f"{opening} La conversation compte {rapid} alternances rapides "
+                f"et {overlaps} chevauchements détectés. "
+                + (
+                    "Certains passages contiennent aussi des formulations de "
+                    "tension, mais l'ensemble ne suffit pas à qualifier "
+                    "automatiquement l'échange de dégénérescence."
+                    if signal_turns
+                    else (
+                        "La transcription ne contient pas non plus d'escalade "
+                        "verbale explicite."
+                    )
+                )
+            )
+            points = tuple(_evidence_insight(citation) for citation in citations)
+        elif citations:
+            answer = (
+                "La transcription contient quelques formulations de tension ou "
+                "de désaccord, mais elle ne montre pas à elle seule que le ton "
+                "vocal monte continuellement ou que la consultation dégénère."
+            )
+            points = tuple(_evidence_insight(citation) for citation in citations)
+        else:
+            answer = (
+                "Je ne retrouve pas d'escalade verbale explicite dans la "
+                "transcription. Je ne peux toutefois pas conclure sur le volume, "
+                "l'intonation ou la colère sans analyse acoustique de l'audio."
+            )
+            points = ()
+        return VerificationResult(
+            question=question,
+            claim=question,
+            intent=CONSULTATION_QA,
+            target_role=None,
+            verdict=ANSWERED,
+            confidence=0.58 if citations else 0.45,
+            explanation=answer,
+            citations=citations,
+            roles=roles,
+            backend="analyse-conversationnelle-de-secours",
+            answer=answer,
+            analysis_points=points,
+            nuance=(
+                (
+                    str(audio_observations.get("limitations") or "")
+                    if acoustic_available and isinstance(audio_observations, Mapping)
+                    else (
+                        "Cette lecture porte sur les mots et la dynamique des tours. "
+                        "Une mesure du volume, de l'intonation et du débit est "
+                        "nécessaire pour évaluer précisément le ton vocal."
+                    )
+                )
+            ),
+            warnings=(
+                "Le modèle local polyvalent n'est pas installé ou configuré.",
+            ),
+        )
+
+    if re.search(r"\bqui\b.{0,25}\bparle\b.{0,15}\bplus\b", folded):
+        counts: dict[RoleName, int] = defaultdict(int)
+        for turn in records:
+            counts[roles.role_for(turn.speaker_id)] += len(turn.text.split())
+        ranked = sorted(counts.items(), key=lambda item: -item[1])
+        leading_role, leading_words = ranked[0]
+        total_words = sum(counts.values())
+        share = leading_words / max(1, total_words)
+        answer = (
+            f"Le {leading_role} parle le plus dans la transcription, avec environ "
+            f"{share:.0%} des mots transcrits ({leading_words} sur {total_words})."
+        )
+        representative = next(
+            (
+                turn
+                for turn in records
+                if roles.role_for(turn.speaker_id) == leading_role
+            ),
+            records[0],
+        )
+        citation = Citation(
+            id=f"turn-{representative.index:05d}",
+            turn_index=representative.index,
+            start=representative.start,
+            end=representative.end,
+            speaker_id=representative.speaker_id,
+            speaker=representative.speaker,
+            role=leading_role,
+            text=representative.text,
+            relevance=1.0,
+            excerpt=representative.text,
+        )
+        return VerificationResult(
+            question=question,
+            claim=question,
+            intent=CONSULTATION_QA,
+            target_role=None,
+            verdict=ANSWERED,
+            confidence=0.9,
+            explanation=answer,
+            citations=(citation,),
+            roles=roles,
+            backend="statistiques-locales",
+            answer=answer,
+            analysis_points=(
+                f"Client : {counts.get('Client', 0)} mots ; "
+                f"Master : {counts.get('Master', 0)} mots.",
+            ),
+            nuance=(
+                "Le calcul utilise les mots transcrits ; il peut différer "
+                "légèrement du temps de parole acoustique réel."
+            ),
+        )
+
+    claim = extract_claim(question)
+    scored = sorted(
+        (
+            _score_turn(turn, claim, roles.role_for(turn.speaker_id))
+            for turn in records
+        ),
+        key=_scored_sort_key,
+    )
+    useful = [item for item in scored[:3] if item.score >= 0.30]
+    citations = tuple(_citation(item) for item in useful)
+    if citations:
+        answer = (
+            "J'ai retrouvé des passages liés à la question, mais le moteur de "
+            "secours ne permet pas d'en tirer une réponse suffisamment complète. "
+            "Les extraits ci-dessous sont proposés pour relecture."
+        )
+        verdict = PARTIAL
+        confidence = 0.45
+    else:
+        answer = (
+            "Je ne peux pas répondre de manière fiable à cette question avec le "
+            "moteur de secours. Installez l'Assistant Premium ou reformulez la "
+            "demande autour d'un fait, d'un thème ou d'une synthèse."
+        )
+        verdict = NOT_FOUND
+        confidence = 0.35
+    return VerificationResult(
+        question=question,
+        claim=question,
+        intent=CONSULTATION_QA,
+        target_role=None,
+        verdict=verdict,
+        confidence=confidence,
+        explanation=answer,
+        citations=citations,
+        roles=roles,
+        backend="analyse-conversationnelle-de-secours",
+        answer=answer,
+        analysis_points=tuple(_evidence_insight(item) for item in citations),
+        nuance=(
+            "Aucun fait n'est inventé : la réponse reste limitée aux passages "
+            "réellement retrouvés."
+        ),
+        warnings=(
+            "Le modèle local polyvalent n'est pas installé ou configuré.",
+        ),
+    )
+
+
 def verify_claim_result(
     turns: Sequence[object],
     question: str,
@@ -1620,6 +3329,7 @@ def verify_claim_result(
     role_overrides: Mapping[str, str] | None = None,
     reasoner: ClaimReasoner | None = None,
     top_k: int = 6,
+    audio_observations: Mapping[str, object] | None = None,
 ) -> VerificationResult:
     """Vérifie une affirmation avec un repli déterministe toujours disponible.
 
@@ -1628,9 +3338,54 @@ def verify_claim_result(
     """
 
     question = str(question or "").strip()
-    claim = extract_claim(question)
+    intent = classify_query_intent(question)
     records = _normalise_turns(turns)
     role_proposal = roles or propose_speaker_roles(turns, overrides=role_overrides)
+    model_warning: str | None = None
+    if reasoner is not None:
+        model_result, model_warning = _try_consultation_reasoner(
+            reasoner,
+            records=records,
+            question=question,
+            intent=intent,
+            roles=role_proposal,
+            audio_observations=audio_observations,
+        )
+        if model_result is not None:
+            return model_result
+    if intent == OPEN_SUMMARY:
+        fallback = _summary_result(records, question, role_proposal)
+        return (
+            replace(fallback, warnings=(model_warning,))
+            if model_warning
+            else fallback
+        )
+    if intent == TOPIC_PRESENCE:
+        fallback = _topic_presence_result(records, question, role_proposal)
+        return (
+            replace(fallback, warnings=(model_warning,))
+            if model_warning
+            else fallback
+        )
+    if intent == CONSULTATION_QA:
+        fallback = _general_fallback_result(
+            records,
+            question,
+            role_proposal,
+            audio_observations=audio_observations,
+        )
+        return (
+            replace(
+                fallback,
+                warnings=tuple(
+                    dict.fromkeys((*fallback.warnings, model_warning))
+                ),
+            )
+            if model_warning
+            else fallback
+        )
+
+    claim = extract_claim(question)
     target_role = _target_role(question)
     scored = [
         _score_turn(turn, claim, role_proposal.role_for(turn.speaker_id))
@@ -1729,6 +3484,7 @@ def verify_claim_result(
     return VerificationResult(
         question=question,
         claim=claim,
+        intent=CLAIM_VERIFICATION,
         target_role=target_role,
         verdict=decision.verdict,
         confidence=decision.confidence,
@@ -1813,6 +3569,7 @@ def verify_claim(
     *,
     reasoner: ClaimReasoner | None = None,
     top_k: int = 6,
+    audio_observations: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Façade JSON stable destinée à l'interface de la fiche audio."""
 
@@ -1829,6 +3586,7 @@ def verify_claim(
         roles=roles,
         reasoner=reasoner,
         top_k=top_k,
+        audio_observations=audio_observations,
     )
     payload = result.to_dict()
     records = _normalise_turns(turns)
@@ -1847,11 +3605,29 @@ def verify_claim(
 
 
 __all__ = [
+    "ANSWERED",
+    "ASSISTANT_MODEL_REPOSITORY",
+    "ASSISTANT_MODEL_REVISION",
+    "ASSISTANT_MODEL_NAME",
+    "ASSISTANT_REQUIRED_MODEL_FILES",
+    "BUNDLED_ASSISTANT_MODEL_DIR",
+    "CLAIM_VERIFICATION",
     "CLARIFY",
     "CONFIRMED",
+    "CONSULTATION_QA",
     "CONTRADICTED",
+    "ConsultationDecision",
+    "ConsultationRequest",
+    "ConsultationReasoner",
+    "DEFAULT_ASSISTANT_MODEL_DIR",
     "NOT_FOUND",
+    "OPEN_SUMMARY",
     "PARTIAL",
+    "SUMMARY",
+    "TOPIC_MENTIONED",
+    "TOPIC_PRESENCE",
+    "TOPIC_PRESENT",
+    "TOPIC_PRIMARY",
     "Citation",
     "ClaimReasoner",
     "OpenVINOJsonReasoner",
@@ -1861,9 +3637,13 @@ __all__ = [
     "SpeakerRole",
     "VerificationResult",
     "build_answer_sections",
+    "build_consultation_prompt",
     "build_grounded_prompt",
+    "classify_query_intent",
     "extract_claim",
     "get_default_reasoner",
+    "resolve_openvino_assistant_model_path",
+    "release_default_reasoners",
     "propose_speaker_roles",
     "retrieve_passages",
     "suggest_speaker_roles",

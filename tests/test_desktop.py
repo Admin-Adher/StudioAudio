@@ -15,6 +15,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from transcription_locale.desktop import (
+    ASSISTANT_SMOKE_TEST_FLAG,
     AlreadyRunningError,
     AppInstanceLock,
     DesktopController,
@@ -24,6 +25,7 @@ from transcription_locale.desktop import (
     find_available_port,
     main,
     run_desktop_smoke_test,
+    run_assistant_smoke_test,
     validate_desktop_runtime,
     wait_for_loopback_server,
 )
@@ -205,6 +207,154 @@ class DesktopRuntimeTests(unittest.TestCase):
             ):
                 self.assertEqual(main(["--smoke-test"]), 0)
             smoke.assert_called_once_with(directories, root / "application.log")
+
+    def test_main_assistant_smoke_mode_does_not_start_a_native_window(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directories = {"root": root, "logs": root / "logs"}
+            with (
+                patch(
+                    "transcription_locale.desktop.configure_desktop_environment",
+                    return_value=directories,
+                ),
+                patch(
+                    "transcription_locale.desktop.configure_logging",
+                    return_value=root / "application.log",
+                ),
+                patch(
+                    "transcription_locale.desktop.run_assistant_smoke_test",
+                    return_value=0,
+                ) as assistant_smoke,
+                patch(
+                    "transcription_locale.desktop.run_desktop_smoke_test",
+                ) as desktop_smoke,
+            ):
+                self.assertEqual(main([ASSISTANT_SMOKE_TEST_FLAG]), 0)
+            assistant_smoke.assert_called_once_with(
+                directories,
+                root / "application.log",
+            )
+            desktop_smoke.assert_not_called()
+
+    def test_assistant_smoke_loads_qwen_and_writes_a_structured_report(self) -> None:
+        class FakeOpenVINOReasoner:
+            name = "OpenVINO-local"
+            model_path = Path("C:/modeles/qwen")
+            device = "GPU"
+            active_device = "GPU"
+            max_new_tokens = 512
+
+            def __init__(self) -> None:
+                self.prompt = ""
+                self.schema: object | None = None
+
+            def _generate_json(
+                self,
+                prompt: str,
+                *,
+                json_schema: object,
+            ) -> str:
+                self.prompt = prompt
+                self.schema = json_schema
+                self.assert_offline = os.environ["HF_HUB_OFFLINE"]
+                return '{"ready":true}'
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reasoner = FakeOpenVINOReasoner()
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = run_assistant_smoke_test(
+                    {"logs": root / "logs"},
+                    root / "application.log",
+                    reasoner_factory=lambda: reasoner,
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(reasoner.max_new_tokens, 64)
+            self.assertEqual(reasoner.assert_offline, "1")
+            self.assertIn('{"ready":true}', reasoner.prompt)
+            self.assertIsNotNone(reasoner.schema)
+            report = json.loads(
+                (root / "logs" / "assistant-smoke.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(report["mode"], "assistant-smoke")
+            self.assertEqual(report["status"], "ok")
+            self.assertEqual(report["backend"], "OpenVINO-local")
+            self.assertEqual(report["device"], "GPU")
+            self.assertEqual(report["model"], str(reasoner.model_path))
+            self.assertEqual(report["response"], {"ready": True})
+            self.assertEqual(json.loads(output.getvalue()), report)
+
+    def test_assistant_smoke_reports_an_unavailable_packaged_model(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with redirect_stdout(io.StringIO()):
+                code = run_assistant_smoke_test(
+                    {"logs": root / "logs"},
+                    root / "application.log",
+                    reasoner_factory=lambda: None,
+                )
+            report = json.loads(
+                (root / "logs" / "assistant-smoke.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(code, 5)
+            self.assertEqual(report["status"], "error")
+            self.assertIn("Aucun backend Qwen", report["error"])
+
+    def test_assistant_smoke_uses_the_short_mlx_generation_path(self) -> None:
+        class FakeTokenizer:
+            def apply_chat_template(
+                self,
+                _messages: object,
+                **_kwargs: object,
+            ) -> str:
+                return "prompt-local"
+
+        class FakeMLXReasoner:
+            name = "MLX-local"
+            model_path = Path("/Applications/Studio Audio/Qwen")
+            max_new_tokens = 512
+
+            def __init__(self) -> None:
+                self.generator_kwargs: dict[str, object] = {}
+                self._generator = self.generate
+
+            def _load(self) -> tuple[object, object]:
+                return object(), FakeTokenizer()
+
+            def generate(
+                self,
+                _model: object,
+                _tokenizer: object,
+                **kwargs: object,
+            ) -> str:
+                self.generator_kwargs = kwargs
+                return '{"ready":true}'
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reasoner = FakeMLXReasoner()
+            with redirect_stdout(io.StringIO()):
+                code = run_assistant_smoke_test(
+                    {"logs": root / "logs"},
+                    root / "application.log",
+                    reasoner_factory=lambda: reasoner,
+                )
+            report = json.loads(
+                (root / "logs" / "assistant-smoke.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(code, 0)
+            self.assertEqual(reasoner.generator_kwargs["max_tokens"], 64)
+            self.assertEqual(reasoner.generator_kwargs["prompt"], "prompt-local")
+            self.assertEqual(report["backend"], "MLX-local")
+            self.assertEqual(report["device"], "METAL")
 
     def test_smoke_runner_reports_success_only_after_clean_shutdown(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

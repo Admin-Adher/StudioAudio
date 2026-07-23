@@ -5,7 +5,7 @@
   #define OutputDir "."
 #endif
 #ifndef AppVersion
-  #define AppVersion "0.3.2"
+  #define AppVersion "0.3.8"
 #endif
 #ifndef IconFile
   #error "IconFile doit pointer vers l'icône Windows."
@@ -24,8 +24,18 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir={#OutputDir}
 OutputBaseFilename=StudioAudio-Windows-x64-Setup-{#AppVersion}
-Compression=lzma2/max
+; Les poids INT4/Safetensors sont déjà denses et gagnent très peu avec LZMA
+; maximal. Le profil fast évite plusieurs heures de compression inutile.
+Compression=lzma2/fast
 SolidCompression=yes
+; Qwen3 INT4 dépasse à lui seul 4,2 Go. Inno Setup impose alors le disk
+; spanning : le petit lanceur .exe et tous les volumes .bin doivent être
+; distribués ensemble dans le même dossier.
+#ifdef BundledAssistantModel
+DiskSpanning=yes
+DiskSliceSize=1900000000
+SlicesPerDisk=1
+#endif
 WizardStyle=modern
 SetupLogging=yes
 CloseApplications=yes
