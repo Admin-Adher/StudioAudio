@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version numérique du logiciel (ex. 0.3.1)"
+        description: "Version numérique du logiciel (ex. 0.3.2)"
         required: true
-        default: "0.3.1"
+        default: "0.3.2"
         type: string
   push:
     tags:

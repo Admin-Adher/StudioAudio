@@ -275,6 +275,7 @@ class OpenVINOCoreIntegrationTests(unittest.TestCase):
         )
         info = SimpleNamespace(language="fr", language_probability=0.99)
         warnings: list[str] = []
+        fallback_order: list[str] = []
 
         class FakeBatchedPipeline:
             def __init__(self, model):
@@ -303,10 +304,12 @@ class OpenVINOCoreIntegrationTests(unittest.TestCase):
                 checkpoint=None,
                 asr_backend=OPENVINO_ARC_BACKEND,
                 backend_warnings=warnings,
+                before_cpu_fallback=lambda: fallback_order.append("diarisation-finie"),
             )
 
         self.assertEqual([word.text for word in words], [" Conservé", " repris"])
         self.assertEqual(model, "small")
+        self.assertEqual(fallback_order, ["diarisation-finie"])
         self.assertEqual(len(warnings), 1)
         self.assertIn("Faster-Whisper a pris le relais", warnings[0])
 

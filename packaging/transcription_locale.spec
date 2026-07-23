@@ -17,7 +17,7 @@ from PyInstaller.utils.hooks import (
 # ``SPECPATH`` est le dossier qui contient ce fichier spec (``packaging``),
 # pas le chemin du fichier lui-même. Le projet se trouve donc un niveau plus haut.
 project_root = Path(SPECPATH).resolve().parent
-app_version = os.environ.get("TRANSCRIPTION_DESKTOP_VERSION", "0.3.1")
+app_version = os.environ.get("TRANSCRIPTION_DESKTOP_VERSION", "0.3.2")
 windows_icon = project_root / "assets" / "app-icon.ico"
 macos_icon = project_root / "assets" / "app-icon.icns"
 is_macos = sys.platform == "darwin"
@@ -45,7 +45,7 @@ def normalize_macos_arch(value):
 if is_macos and not re.fullmatch(r"\d+(?:\.\d+){1,2}", app_version):
     raise ValueError(
         "TRANSCRIPTION_DESKTOP_VERSION doit être une version macOS numérique "
-        "telle que 0.3.1."
+        "telle que 0.3.2."
     )
 
 target_arch = (

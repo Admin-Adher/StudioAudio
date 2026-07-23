@@ -321,10 +321,13 @@ class TranscriptionJobManager:
         resumed = bool(saved_checkpoint)
         resume_count = int(item.get("resume_count") or 0) + (1 if resumed else 0)
         started_at = time.monotonic()
+        initial_progress = (
+            float(item.get("progress") or 0.0) if saved_checkpoint else 0.0
+        )
         update_workspace_item(
             item_id,
             status="En cours",
-            progress=(float(item.get("progress") or 0.0) if saved_checkpoint else 0.0),
+            progress=initial_progress,
             stage=(
                 f"Reprise à {float(saved_checkpoint.get('committed_until_seconds') or 0.0):.1f} s"
                 if saved_checkpoint
@@ -345,11 +348,21 @@ class TranscriptionJobManager:
         def elapsed() -> float:
             return base_elapsed + (time.monotonic() - started_at)
 
+        progress_lock = threading.Lock()
+        last_reported_progress = max(0.0, min(1.0, initial_progress))
+
         def progress(value: float, message: str) -> None:
+            nonlocal last_reported_progress
+            with progress_lock:
+                last_reported_progress = max(
+                    last_reported_progress,
+                    max(0.0, min(1.0, float(value))),
+                )
+                current_progress = last_reported_progress
             update_workspace_item(
                 item_id,
                 status="En cours",
-                progress=max(0.0, min(1.0, float(value))),
+                progress=current_progress,
                 processing_seconds=elapsed(),
                 processing_time=format_duration(elapsed()),
                 stage=str(message),

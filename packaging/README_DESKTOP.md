@@ -33,7 +33,7 @@ Depuis PowerShell, à la racine du projet :
 Le script crée un environnement isolé `.venv-desktop`, construit une version
 PyInstaller **one-folder** et produit :
 
-- `packages\StudioAudio-Windows-x64-Portable-0.3.1.zip`
+- `packages\StudioAudio-Windows-x64-Portable-0.3.2.zip`
 - un `Setup.exe` si Inno Setup 6 est installé.
 
 Le build Windows installe et embarque aussi le runtime OpenVINO requis par le
@@ -58,12 +58,12 @@ Le `.app` macOS doit être compilé **sur un Mac** ; PyInstaller ne sait pas
 cross-compiler un bundle Cocoa depuis Windows.
 
 ```bash
-bash scripts/build_desktop_macos.sh 0.3.1 arm64
+bash scripts/build_desktop_macos.sh 0.3.2 arm64
 ```
 
 Le script utilise un environnement `.venv-desktop-macos-arm64`, génère le véritable
 `Studio Audio.app`, puis l'unique livrable
-`packages/StudioAudio-macOS-arm64-0.3.1.dmg`. Le workflow macOS actuel cible
+`packages/StudioAudio-macOS-arm64-0.3.2.dmg`. Le workflow macOS actuel cible
 uniquement les Mac Apple Silicon et refuse un runner ou un binaire qui ne serait
 pas strictement `arm64`.
 
@@ -77,7 +77,7 @@ Pour signer et notariser la livraison :
 ```bash
 export APPLE_SIGNING_IDENTITY="Developer ID Application: Organisation (TEAMID)"
 export APPLE_NOTARY_PROFILE="transcription-locale"
-bash scripts/build_desktop_macos.sh 0.3.1 arm64
+bash scripts/build_desktop_macos.sh 0.3.2 arm64
 ```
 
 Sans Developer ID/notarisation, Gatekeeper peut afficher un avertissement aux

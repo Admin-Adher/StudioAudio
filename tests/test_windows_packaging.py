@@ -21,7 +21,7 @@ class WindowsPackagingContractTests(unittest.TestCase):
 
     def test_workflow_builds_windows_x64_with_inno_setup(self) -> None:
         self.assertIn("workflow_dispatch:", self.workflow)
-        self.assertIn('default: "0.3.1"', self.workflow)
+        self.assertIn('default: "0.3.2"', self.workflow)
         self.assertIn('- "v*.*.*"', self.workflow)
         self.assertIn("runs-on: windows-2025", self.workflow)
         self.assertIn("architecture: x64", self.workflow)

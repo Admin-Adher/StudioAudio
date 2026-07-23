@@ -9,6 +9,7 @@ import sys
 import tempfile
 import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -158,6 +159,7 @@ class TranscriptionResult:
 _MODEL_LOCK = threading.RLock()
 _WHISPER_MODEL: object | None = None
 _WHISPER_MODEL_ID: str | None = None
+_DIARIZATION_LOCK = threading.Lock()
 
 
 def _progress(callback: ProgressCallback | None, value: float, message: str) -> None:
@@ -450,6 +452,7 @@ def _transcribe_words_openvino(
     resume_checkpoint: Mapping[str, object] | None,
     checkpoint: CheckpointCallback | None,
     backend_warnings: list[str] | None,
+    before_cpu_fallback: Callable[[], None] | None = None,
 ) -> tuple[list[WordStamp], str, float | None, str]:
     """Pilote OpenVINO fenêtré, progressif et reprenable."""
     from .openvino_backend import (
@@ -598,6 +601,8 @@ def _transcribe_words_openvino(
         if backend_warnings is not None:
             backend_warnings.append(warning)
         _progress(progress, 0.12, "Repli automatique vers Faster-Whisper…")
+        if before_cpu_fallback is not None:
+            before_cpu_fallback()
         return _transcribe_words(
             audio,
             duration=duration,
@@ -630,6 +635,7 @@ def _transcribe_words(
     checkpoint: CheckpointCallback | None = None,
     asr_backend: str = FASTER_WHISPER_BACKEND,
     backend_warnings: list[str] | None = None,
+    before_cpu_fallback: Callable[[], None] | None = None,
 ) -> tuple[list[WordStamp], str, float | None, str]:
     requested_backend = str(asr_backend or "")
     asr_backend = platform_compatible_asr_backend(asr_backend)
@@ -663,6 +669,8 @@ def _transcribe_words(
             if backend_warnings is not None:
                 backend_warnings.append(warning)
             _progress(progress, 0.12, "Reprise du moteur de secours depuis le checkpoint…")
+            if before_cpu_fallback is not None:
+                before_cpu_fallback()
             return _transcribe_words(
                 audio,
                 duration=duration,
@@ -689,6 +697,7 @@ def _transcribe_words(
             resume_checkpoint=resume_checkpoint,
             checkpoint=checkpoint,
             backend_warnings=backend_warnings,
+            before_cpu_fallback=before_cpu_fallback,
         )
     if asr_backend != FASTER_WHISPER_BACKEND:
         raise ValueError(f"Moteur de transcription inconnu : {asr_backend}")
@@ -849,18 +858,23 @@ def _diarize_audio(
     duration: float,
     requested_speakers: int,
     progress: ProgressCallback | None,
+    raise_on_error: bool = False,
 ) -> tuple[list[SpeakerSegment], list[str]]:
     if requested_speakers <= 1:
         return [SpeakerSegment(0.0, duration, "SPEAKER_00")], []
 
     _progress(progress, 0.65, f"Séparation des {requested_speakers} voix…")
     try:
-        from diarize import diarize as diarize_file
+        # Les modèles de diarisation ne sont pas garantis réentrants. Le verrou
+        # évite qu'un ancien flux UI et le gestionnaire de jobs les chargent
+        # simultanément, tout en laissant l'ASR Intel Arc travailler en parallèle.
+        with _DIARIZATION_LOCK:
+            from diarize import diarize as diarize_file
 
-        result = diarize_file(
-            str(normalized_path),
-            num_speakers=requested_speakers,
-        )
+            result = diarize_file(
+                str(normalized_path),
+                num_speakers=requested_speakers,
+            )
         segments = [
             SpeakerSegment(float(item.start), float(item.end), str(item.speaker))
             for item in result.segments
@@ -875,6 +889,8 @@ def _diarize_audio(
             )
         return segments, warnings
     except Exception as exc:
+        if raise_on_error:
+            raise
         warning = (
             "La séparation des voix n'a pas abouti ; la transcription reste disponible "
             f"avec une seule étiquette ({type(exc).__name__}: {exc})."
@@ -908,7 +924,45 @@ def run_pipeline(
     if not 1 <= int(requested_speakers) <= 8:
         raise ValueError("Le nombre d'interlocuteurs doit être compris entre 1 et 8.")
 
-    _progress(progress, 0.02, "Décodage et préparation de l'audio…")
+    progress_lock = threading.Lock()
+    last_progress = 0.0
+
+    def report_progress(value: float, message: str) -> None:
+        """Garantit une progression monotone, y compris lors d'un repli ASR."""
+
+        nonlocal last_progress
+        with progress_lock:
+            last_progress = max(last_progress, max(0.0, min(1.0, float(value))))
+            current = last_progress
+        _progress(progress, current, message)
+
+    checkpoint_lock = threading.RLock()
+    checkpoint_state: dict[str, object] = dict(resume_checkpoint or {})
+
+    def publish_checkpoint(update: Mapping[str, object]) -> None:
+        if checkpoint is None:
+            return
+        # Le callback est volontairement exécuté sous le même verrou : un
+        # résultat de diarisation terminé ne peut ainsi être écrasé par un
+        # checkpoint ASR plus ancien publié au même instant.
+        with checkpoint_lock:
+            checkpoint_state.update(dict(update))
+            checkpoint_state["version"] = 2
+            checkpoint(dict(checkpoint_state))
+
+    def publish_diarization(
+        segments: Sequence[SpeakerSegment],
+        diarization_warnings: Sequence[str],
+    ) -> None:
+        publish_checkpoint(
+            {
+                "diarization_stage": "complete",
+                "speaker_segments": [asdict(segment) for segment in segments],
+                "diarization_warnings": list(diarization_warnings),
+            }
+        )
+
+    _progress(report_progress, 0.02, "Décodage et préparation de l'audio…")
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     WESPEAKER_MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -923,68 +977,225 @@ def run_pipeline(
     with tempfile.TemporaryDirectory(prefix="transcription-locale-") as temp_dir:
         normalized_path = Path(temp_dir) / "audio-16khz-mono.wav"
         sf.write(str(normalized_path), audio, 16000, subtype="PCM_16")
-        _progress(progress, 0.08, "Audio prêt (mono, 16 kHz).")
+        _progress(report_progress, 0.08, "Audio prêt (mono, 16 kHz).")
+
+        speaker_segments = _speaker_segments_from_checkpoint(resume_checkpoint)
+        resume_diarization_stage = str(
+            (resume_checkpoint or {}).get("diarization_stage") or ""
+        )
+        legacy_stage = str((resume_checkpoint or {}).get("stage") or "")
+        diarization_restored = bool(
+            speaker_segments
+            and (
+                resume_diarization_stage == "complete"
+                or legacy_stage == "diarization_complete"
+            )
+        )
+        raw_diarization_warnings = (resume_checkpoint or {}).get(
+            "diarization_warnings"
+        )
+        if not isinstance(raw_diarization_warnings, list):
+            raw_diarization_warnings = (
+                (resume_checkpoint or {}).get("warnings")
+                if legacy_stage == "diarization_complete"
+                else []
+            )
+        restored_diarization_warnings = (
+            [str(value) for value in raw_diarization_warnings]
+            if isinstance(raw_diarization_warnings, list)
+            else []
+        )
 
         backend_warnings: list[str] = []
         domain_prompt = build_domain_prompt(initial_prompt, language)
         domain_hotwords = build_domain_hotwords(initial_prompt, language)
-        words, detected_language, language_probability, model_id = _transcribe_words(
-            audio,
-            duration=duration,
-            profile=profile,
-            language=language,
-            initial_prompt=domain_prompt,
-            hotwords=domain_hotwords,
-            progress=progress,
-            partial=partial,
-            resume_checkpoint=resume_checkpoint,
-            checkpoint=checkpoint,
-            asr_backend=asr_backend,
-            backend_warnings=backend_warnings,
+        diarization_future: Future[
+            tuple[list[SpeakerSegment], list[str]]
+        ] | None = None
+        diarization_executor: ThreadPoolExecutor | None = None
+        diarization_published = threading.Event()
+        diarization_publish_errors: list[BaseException] = []
+        resume_model = str((resume_checkpoint or {}).get("model") or "")
+        resume_uses_cpu_fallback = bool(
+            _words_from_checkpoint(resume_checkpoint)
+            and resume_model
+            and not resume_model.startswith("openvino/")
         )
-        if not words:
-            raise ValueError("Aucune parole n'a été reconnue dans ce fichier.")
+        parallel_diarization = bool(
+            not diarization_restored
+            and not resume_uses_cpu_fallback
+            and int(requested_speakers) > 1
+            and platform_compatible_asr_backend(asr_backend)
+            == OPENVINO_ARC_BACKEND
+        )
 
-        speaker_segments = _speaker_segments_from_checkpoint(resume_checkpoint)
-        if (
-            speaker_segments
-            and str((resume_checkpoint or {}).get("stage") or "")
-            == "diarization_complete"
-        ):
-            raw_warnings = (resume_checkpoint or {}).get("warnings")
-            warnings = (
-                [str(value) for value in raw_warnings]
-                if isinstance(raw_warnings, list)
-                else []
-            )
-            warnings.extend(
-                warning for warning in backend_warnings if warning not in warnings
-            )
-            _progress(progress, 0.86, "Séparation des voix restaurée depuis le checkpoint.")
-        else:
-            speaker_segments, diarization_warnings = _diarize_audio(
-                normalized_path,
-                duration=duration,
-                requested_speakers=int(requested_speakers),
-                progress=progress,
-            )
-            warnings = [*backend_warnings, *diarization_warnings]
-            if checkpoint is not None:
-                diarization_checkpoint = _transcription_checkpoint(
-                    stage="diarization_complete",
-                    words=words,
-                    position=duration,
-                    model_id=model_id,
-                    language=detected_language,
-                    language_probability=language_probability,
+        def diarization_finished(
+            completed: Future[tuple[list[SpeakerSegment], list[str]]],
+        ) -> None:
+            try:
+                completed_segments, completed_warnings = completed.result()
+                # Ce checkpoint peut arriver avant la fin de l'ASR. Le
+                # coordinateur conserve ensuite ces champs dans chaque
+                # checkpoint de transcription.
+                publish_diarization(completed_segments, completed_warnings)
+            except BaseException as exc:
+                # L'erreur d'inférence reste attachée au Future et sera traitée
+                # par le repli séquentiel. Seule une erreur de publication doit
+                # être transportée séparément jusqu'au thread principal.
+                if not completed.cancelled() and completed.exception() is None:
+                    diarization_publish_errors.append(exc)
+            finally:
+                diarization_published.set()
+
+        if parallel_diarization:
+            try:
+                diarization_executor = ThreadPoolExecutor(
+                    max_workers=1,
+                    thread_name_prefix="studio-audio-diarisation",
                 )
-                diarization_checkpoint["speaker_segments"] = [
-                    asdict(segment) for segment in speaker_segments
-                ]
-                diarization_checkpoint["warnings"] = list(warnings)
-                checkpoint(diarization_checkpoint)
+                diarization_future = diarization_executor.submit(
+                    _diarize_audio,
+                    normalized_path,
+                    duration=duration,
+                    requested_speakers=int(requested_speakers),
+                    progress=None,
+                    raise_on_error=True,
+                )
+                diarization_future.add_done_callback(diarization_finished)
+                _progress(
+                    report_progress,
+                    0.10,
+                    "Transcription et séparation des voix en parallèle…",
+                )
+            except Exception:
+                if diarization_executor is not None:
+                    diarization_executor.shutdown(wait=True, cancel_futures=True)
+                diarization_executor = None
+                diarization_future = None
+                _progress(
+                    report_progress,
+                    0.10,
+                    "Transcription en cours ; séparation séquentielle prévue…",
+                )
 
-    _progress(progress, 0.88, "Alignement des mots avec les voix…")
+        parallel_diarization_result: tuple[
+            list[SpeakerSegment],
+            list[str],
+        ] | None = None
+
+        def resolve_parallel_diarization(
+            *,
+            wait_progress: float,
+            wait_message: str,
+        ) -> tuple[list[SpeakerSegment], list[str]]:
+            nonlocal parallel_diarization_result
+            if parallel_diarization_result is not None:
+                return parallel_diarization_result
+            if diarization_future is None:
+                raise RuntimeError("Aucune séparation parallèle à finaliser.")
+            if not diarization_future.done():
+                _progress(report_progress, wait_progress, wait_message)
+            try:
+                parallel_diarization_result = diarization_future.result()
+                diarization_published.wait()
+            except Exception:
+                _progress(
+                    report_progress,
+                    wait_progress,
+                    "Repli vers la séparation séquentielle des voix…",
+                )
+                parallel_diarization_result = _diarize_audio(
+                    normalized_path,
+                    duration=duration,
+                    requested_speakers=int(requested_speakers),
+                    progress=report_progress,
+                )
+                publish_diarization(*parallel_diarization_result)
+            if diarization_publish_errors:
+                raise diarization_publish_errors[0]
+            return parallel_diarization_result
+
+        def finish_diarization_before_cpu_fallback() -> None:
+            if diarization_future is None:
+                return
+            resolve_parallel_diarization(
+                wait_progress=0.20,
+                wait_message=(
+                    "Intel Arc indisponible ; finalisation de la séparation "
+                    "avant le repli CPU…"
+                ),
+            )
+
+        try:
+            words, detected_language, language_probability, model_id = _transcribe_words(
+                audio,
+                duration=duration,
+                profile=profile,
+                language=language,
+                initial_prompt=domain_prompt,
+                hotwords=domain_hotwords,
+                progress=report_progress,
+                partial=partial,
+                resume_checkpoint=resume_checkpoint,
+                checkpoint=publish_checkpoint,
+                asr_backend=asr_backend,
+                backend_warnings=backend_warnings,
+                before_cpu_fallback=finish_diarization_before_cpu_fallback,
+            )
+            if not words:
+                raise ValueError("Aucune parole n'a été reconnue dans ce fichier.")
+
+            if diarization_restored:
+                diarization_warnings = restored_diarization_warnings
+                _progress(
+                    report_progress,
+                    0.86,
+                    "Séparation des voix restaurée depuis le checkpoint.",
+                )
+            elif diarization_future is not None:
+                speaker_segments, diarization_warnings = (
+                    resolve_parallel_diarization(
+                        wait_progress=0.65,
+                        wait_message=(
+                            "Transcription terminée ; finalisation de la "
+                            "séparation des voix…"
+                        ),
+                    )
+                )
+                _progress(
+                    report_progress,
+                    0.86,
+                    "Transcription et séparation des voix terminées.",
+                )
+            else:
+                speaker_segments, diarization_warnings = _diarize_audio(
+                    normalized_path,
+                    duration=duration,
+                    requested_speakers=int(requested_speakers),
+                    progress=report_progress,
+                )
+                publish_diarization(speaker_segments, diarization_warnings)
+
+            warnings = [*backend_warnings]
+            warnings.extend(
+                warning
+                for warning in diarization_warnings
+                if warning not in warnings
+            )
+            publish_checkpoint({"warnings": list(warnings)})
+        except Exception:
+            if diarization_future is not None and not diarization_future.done():
+                _progress(
+                    report_progress,
+                    0.20,
+                    "Arrêt de la transcription ; sécurisation de la séparation en cours…",
+                )
+            raise
+        finally:
+            if diarization_executor is not None:
+                diarization_executor.shutdown(wait=True, cancel_futures=True)
+
+    _progress(report_progress, 0.88, "Alignement des mots avec les voix…")
     turns = align_words_to_speakers(words, speaker_segments, speaker_names)
     for turn in turns:
         turn.text = normalize_domain_text(turn.text, initial_prompt)
@@ -993,7 +1204,7 @@ def run_pipeline(
 
     detected_speakers = len({turn.speaker_id for turn in turns})
     elapsed = time.perf_counter() - started_at
-    _progress(progress, 0.94, "Création des fichiers à télécharger…")
+    _progress(report_progress, 0.94, "Création des fichiers à télécharger…")
     effective_engine = (
         OPENVINO_ARC_BACKEND
         if model_id.startswith("openvino/")
