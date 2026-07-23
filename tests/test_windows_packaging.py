@@ -143,6 +143,10 @@ class WindowsPackagingContractTests(unittest.TestCase):
             "$AssistantSmokeDetail = [string](",
             self.build_script,
         )
+        self.assertIn(
+            "$null -ne $AssistantSmokeProcess.ExitCode",
+            self.build_script,
+        )
         self.assertIn('$env:HF_HUB_OFFLINE = "1"', self.build_script)
         self.assertIn('$env:TRANSFORMERS_OFFLINE = "1"', self.build_script)
         self.assertIn('"assistant-smoke.json"', self.build_script)

@@ -273,7 +273,13 @@ if (-not $SkipBundledAssistantModel) {
         # both streams and makes the exit code reliable.
         $AssistantSmokeProcess.WaitForExit()
         $AssistantSmokeProcess.Refresh()
-        if ($AssistantSmokeProcess.ExitCode -ne 0) {
+        # Start-Process peut encore renvoyer $null avec les redirections sous
+        # Windows PowerShell 5.1. Dans ce cas, le rapport JSON et le journal
+        # vérifiés juste après restent l'autorité ; un vrai code non nul échoue.
+        if (
+            $null -ne $AssistantSmokeProcess.ExitCode -and
+            $AssistantSmokeProcess.ExitCode -ne 0
+        ) {
             $AssistantSmokeDetail = ""
             if (Test-Path -LiteralPath $AssistantSmokeStderr) {
                 $AssistantSmokeDetail = [string](
