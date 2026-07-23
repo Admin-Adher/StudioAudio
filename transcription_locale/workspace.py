@@ -26,7 +26,7 @@ DATA_DIR = ROOT_DIR / "donnees"
 AUDIO_LIBRARY_DIR = DATA_DIR / "audios"
 CHECKPOINT_DIR = DATA_DIR / "checkpoints"
 WORKSPACE_PATH = DATA_DIR / "espace-travail.json"
-WORKSPACE_VERSION = 5
+WORKSPACE_VERSION = 6
 
 STANDARD_TRANSCRIPTION_ENGINE = FASTER_WHISPER_BACKEND
 OPENVINO_TRANSCRIPTION_ENGINE = OPENVINO_ARC_BACKEND
@@ -44,6 +44,7 @@ def blank_workspace() -> dict[str, Any]:
     return {
         "version": WORKSPACE_VERSION,
         "order": [],
+        "queue_order": [],
         "items": {},
         "batch_zip": None,
         "preferences": {
@@ -186,6 +187,11 @@ def delete_workspace_item(
     normalised["order"] = [
         current_id
         for current_id in normalised["order"]
+        if current_id != item_id
+    ]
+    normalised["queue_order"] = [
+        current_id
+        for current_id in normalised.get("queue_order", [])
         if current_id != item_id
     ]
     return save_workspace(normalised), display_name
@@ -655,6 +661,7 @@ def normalise_workspace(raw: object) -> dict[str, Any]:
     state = dict(raw)
     state["version"] = WORKSPACE_VERSION
     state["order"] = []
+    state["queue_order"] = []
     state["items"] = {}
     state["batch_zip"] = None
     default_engine = default_asr_backend()
@@ -678,6 +685,35 @@ def normalise_workspace(raw: object) -> dict[str, Any]:
     for item_id in state["items"]:
         if item_id not in state["order"]:
             state["order"].append(item_id)
+
+    raw_queue_order = raw.get("queue_order")
+    if isinstance(raw_queue_order, list):
+        queue_candidates = [str(item_id) for item_id in raw_queue_order]
+    else:
+        # Migration des workspaces antérieurs : tout élément non terminé était
+        # implicitement considéré comme appartenant à la file de traitement.
+        queue_candidates = list(state["order"])
+    for item_id in queue_candidates:
+        item = state["items"].get(item_id)
+        if not isinstance(item, dict) or item_id in state["queue_order"]:
+            continue
+        completed = (
+            str(item.get("status") or "") == "Terminé"
+            and isinstance(item.get("result"), dict)
+        )
+        if not completed:
+            state["queue_order"].append(item_id)
+
+    # Un traitement interrompu doit rester récupérable même si une ancienne
+    # écriture n'avait pas encore persisté son appartenance à la file.
+    for item_id in state["order"]:
+        item = state["items"].get(item_id)
+        if (
+            isinstance(item, dict)
+            and str(item.get("status") or "") in {"En cours", "À reprendre"}
+            and item_id not in state["queue_order"]
+        ):
+            state["queue_order"].append(item_id)
 
     batch_zip = raw.get("batch_zip")
     state["batch_zip"] = str(batch_zip) if batch_zip else None
@@ -739,6 +775,18 @@ def update_workspace_item(item_id: str, **updates: object) -> dict[str, Any]:
             raise KeyError(item_id)
         item.update(updates)
         item["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        queue_order = state.setdefault("queue_order", [])
+        if not isinstance(queue_order, list):
+            queue_order = []
+            state["queue_order"] = queue_order
+        status = str(item.get("status") or "")
+        completed = status == "Terminé" and isinstance(item.get("result"), dict)
+        if completed:
+            state["queue_order"] = [
+                current_id for current_id in queue_order if current_id != item_id
+            ]
+        elif status in {"En cours", "À reprendre", "Échec"} and item_id not in queue_order:
+            queue_order.append(item_id)
 
     return mutate_workspace(apply)
 

@@ -25,6 +25,8 @@ from transcription_locale.ui import (
     _item_transcript,
     _role_summary_html,
     _role_voice_excerpt_html,
+    _workspace_queue_rows,
+    _workspace_status_markdown,
     _workspace_library_rows,
     add_comment_ui,
     add_reply_ui,
@@ -108,6 +110,7 @@ class StreamingUiTests(unittest.TestCase):
         ):
             outputs = poll_workspace_ui("audio-1", LIBRARY_SORTS[0])
 
+        self.assertEqual(len(outputs), 21)
         self.assertEqual(outputs[5], "Texte durable déjà reconnu.")
         self.assertIn("42 s", outputs[13])
 
@@ -478,6 +481,80 @@ class StreamingUiTests(unittest.TestCase):
 
         self.assertEqual([row[0] for row in by_name], ["Alpha.wav", "Bravo.wav"])
         self.assertEqual([row[0] for row in by_date], ["Bravo.wav", "Alpha.wav"])
+
+    def test_completed_audio_leaves_the_active_queue_but_stays_in_the_library(self) -> None:
+        state = {
+            "order": ["done", "waiting"],
+            "queue_order": ["done", "waiting"],
+            "items": {
+                "done": {
+                    "name": "Consultation terminée.wav",
+                    "status": "Terminé",
+                    "progress": 1.0,
+                    "result": {"turns": []},
+                    "comments": [],
+                },
+                "waiting": {
+                    "name": "Prochaine consultation.wav",
+                    "status": "En attente",
+                    "progress": 0.0,
+                    "result": None,
+                    "comments": [],
+                },
+            },
+        }
+
+        queue_rows = _workspace_queue_rows(state)
+        library_rows = _workspace_library_rows(state, LIBRARY_SORTS[0])
+
+        self.assertEqual([row[1] for row in queue_rows], ["Prochaine consultation.wav"])
+        self.assertEqual(len(library_rows), 2)
+        self.assertIn("1 audio", _workspace_status_markdown(state))
+
+    def test_completed_only_workspace_has_an_explicit_empty_queue_state(self) -> None:
+        state = self._discussion_state("audio-1", "audio-2")
+        state["queue_order"] = ["audio-1", "audio-2"]
+
+        self.assertEqual(_workspace_queue_rows(state), [])
+        status = _workspace_status_markdown(state)
+        self.assertIn("Aucun audio en attente", status)
+        self.assertIn("Fiches", status)
+
+    def test_queue_delete_targets_the_filtered_queue_identifier(self) -> None:
+        state = {
+            "order": ["done", "waiting"],
+            "queue_order": ["waiting"],
+            "items": {
+                "done": {
+                    "id": "done",
+                    "name": "Terminé.wav",
+                    "status": "Terminé",
+                    "result": {"turns": []},
+                },
+                "waiting": {
+                    "id": "waiting",
+                    "name": "À traiter.wav",
+                    "status": "En attente",
+                    "result": None,
+                },
+            },
+        }
+        deleted_state = {
+            "order": ["done"],
+            "queue_order": [],
+            "items": {"done": state["items"]["done"]},
+        }
+
+        with (
+            patch("transcription_locale.ui.load_workspace", return_value=state),
+            patch(
+                "transcription_locale.ui.delete_workspace_item",
+                return_value=(deleted_state, "À traiter.wav"),
+            ) as delete_item,
+        ):
+            delete_audio_by_target_ui("queue:0", LIBRARY_SORTS[0], state)
+
+        self.assertEqual(delete_item.call_args.args[1], "waiting")
 
     def test_selected_transcript_passage_gets_a_temporal_anchor(self) -> None:
         state = self._discussion_state("audio-1")

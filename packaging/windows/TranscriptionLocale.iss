@@ -5,7 +5,7 @@
   #define OutputDir "."
 #endif
 #ifndef AppVersion
-  #define AppVersion "0.2.0"
+  #define AppVersion "0.3.1"
 #endif
 #ifndef IconFile
   #error "IconFile doit pointer vers l'icône Windows."

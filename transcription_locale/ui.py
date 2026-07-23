@@ -76,7 +76,7 @@ LANGUAGES = {
     "Portugais": "pt",
 }
 
-QUEUE_HEADERS = ["#", "Audio", "Statut", "Progression", "Traitement", ""]
+QUEUE_HEADERS = ["Ordre", "Audio", "Statut", "Progression", "Traitement", ""]
 LIBRARY_HEADERS = ["Audio", "Ajouté le", "Statut", "Progression", "Discussions", ""]
 LIBRARY_SORTS = [
     "Date d'ajout · plus récent",
@@ -448,6 +448,17 @@ html, body {
   border-radius: 13px !important;
   background: rgba(255,253,251,.70) !important;
 }
+#queue-table .table-container,
+#queue-table .table-wrap,
+#queue-table .virtual-table-viewport,
+#queue-table .header-table,
+#queue-table .virtual-body,
+#queue-table .virtual-row {
+  width: 100% !important;
+  min-width: 100% !important;
+}
+#queue-table .virtual-table-viewport { background: #fffdfb !important; }
+#queue-table .header-table { table-layout: fixed !important; }
 #queue-table table { font-size: .91rem; }
 #queue-table .header-cell,
 #fiche-library-table .header-cell,
@@ -477,9 +488,45 @@ html, body {
   background: transparent !important;
   opacity: 1 !important;
 }
-#queue-table th:first-child, #queue-table td:first-child { width: 68px; text-align: center; }
-#queue-table th:nth-child(3), #queue-table td:nth-child(3) { width: 125px; }
-#queue-table th:nth-child(4), #queue-table td:nth-child(4) { width: 110px; }
+#queue-table .header-cell button { cursor: default !important; pointer-events: none !important; }
+@media (min-width: 1121px) {
+  #queue-table .header-cell[data-heading="0"],
+  #queue-table .body-cell[data-col="0"] {
+    width: 7% !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    flex: 0 0 7% !important;
+    text-align: center !important;
+  }
+  #queue-table .header-cell[data-heading="1"],
+  #queue-table .body-cell[data-col="1"] {
+    width: 34% !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    flex: 0 0 34% !important;
+  }
+  #queue-table .header-cell[data-heading="2"],
+  #queue-table .body-cell[data-col="2"] {
+    width: 16% !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    flex: 0 0 16% !important;
+  }
+  #queue-table .header-cell[data-heading="3"],
+  #queue-table .body-cell[data-col="3"] {
+    width: 14% !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    flex: 0 0 14% !important;
+  }
+  #queue-table .header-cell[data-heading="4"],
+  #queue-table .body-cell[data-col="4"] {
+    width: calc(29% - 48px) !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    flex: 0 0 calc(29% - 48px) !important;
+  }
+}
 #fiche-library-table table { font-size: .9rem; }
 #fiche-library-table th { color: #544b43 !important; background: #eee6db !important; }
 #fiche-library-table .virtual-row,
@@ -1289,12 +1336,12 @@ html, body {
 .status-banner { margin: 14px 0 !important; }
 #queue-job-status {
   min-width: 0 !important;
-  margin: 8px 2px 2px !important;
-  padding: 0 !important;
+  margin: 2px 0 0 !important;
+  padding: 12px 14px !important;
   overflow: hidden !important;
-  border: 0 !important;
-  border-radius: 0 !important;
-  background: transparent !important;
+  border: 1px solid rgba(112,96,78,.14) !important;
+  border-radius: 14px !important;
+  background: rgba(247,243,237,.72) !important;
   box-shadow: none !important;
 }
 #queue-job-status > .styler,
@@ -1306,9 +1353,10 @@ html, body {
   background: transparent !important;
   box-shadow: none !important;
 }
-#queue-job-status .prose {
-  padding: 9px 12px !important;
-  border-left: 2px solid #bca68f !important;
+#queue-job-status [data-testid="markdown"].prose,
+#queue-job-status .md.prose {
+  padding: 0 !important;
+  border-left: 0 !important;
 }
 #queue-job-status h3 {
   margin: 0 0 2px !important;
@@ -1326,6 +1374,38 @@ html, body {
   padding: 16px !important;
   box-shadow: 0 13px 36px rgba(91,76,59,.07) !important;
 }
+.queue-toolbar { align-items: end !important; margin-bottom: 8px !important; }
+.queue-flow-note {
+  min-width: 250px;
+  padding: 12px 14px;
+  border: 1px solid rgba(112,96,78,.14);
+  border-radius: 14px;
+  background: rgba(247,243,237,.68);
+}
+.queue-flow-note span,
+.queue-flow-note strong { display: block; }
+.queue-flow-note span {
+  margin-bottom: 3px;
+  color: var(--muted);
+  font-size: .72rem;
+}
+.queue-flow-note strong { color: var(--ink); font-size: .86rem; }
+#queue-empty-state {
+  display: flex;
+  align-items: center;
+  min-height: 112px;
+  padding: 22px;
+  border: 1px dashed rgba(112,96,78,.22);
+  border-radius: 16px;
+  background: linear-gradient(145deg, rgba(255,255,255,.72), rgba(247,243,237,.68));
+}
+.queue-empty-copy { min-width: 0; }
+.queue-empty-copy strong,
+.queue-empty-copy span { display: block; }
+.queue-empty-copy strong { margin-bottom: 4px; color: var(--ink); font-size: .96rem; }
+.queue-empty-copy span { color: var(--muted); font-size: .82rem; line-height: 1.5; }
+#queue-active-card:has(#queue-table .virtual-row) #queue-empty-state { display: none !important; }
+#queue-active-card:not(:has(#queue-table .virtual-row)) #queue-table { display: none !important; }
 .section-heading {
   display: flex;
   justify-content: space-between;
@@ -2816,6 +2896,8 @@ footer { display: none !important; }
     max-width: none;
     text-align: left;
   }
+  .queue-toolbar { align-items: stretch !important; flex-direction: column !important; }
+  .queue-flow-note { width: 100%; min-width: 0; }
   #queue-table .header-cell[data-heading="0"],
   #queue-table .body-cell[data-col="0"],
   #queue-table .header-cell[data-heading="4"],
@@ -5025,14 +5107,14 @@ def _queue_hint(paths: list[Path], confirmation: str = "") -> str:
         count = len(paths)
         noun = "audio" if count == 1 else "audios"
         lead = (
-            f"<strong>{count} {noun} dans la file.</strong> "
+            f"<strong>{count} {noun} à traiter.</strong> "
             "Faites glisser les fichiers pour définir l'ordre de traitement, "
             "puis lancez la file."
         )
     else:
         lead = (
-            "<strong>File vide.</strong> "
-            "Déposez un ou plusieurs fichiers audio ci-dessus."
+            "<strong>Aucun audio en attente.</strong> "
+            "Ajoutez un enregistrement ici ; les transcriptions terminées restent dans Fiches."
         )
     suffix = f" <span class='rename-confirmation'>{html.escape(confirmation)}</span>" if confirmation else ""
     return f"<div class='queue-count'>{lead}{suffix}</div>"
@@ -5097,6 +5179,7 @@ def sync_queue_ui(
         ),
         gr.Textbox(value=current_stem, interactive=enabled),
         gr.Button(interactive=enabled),
+        gr.Button(value="Lancer la file d'attente", interactive=enabled),
     )
 
 
@@ -5171,42 +5254,82 @@ def rename_audio_by_target_ui(
     workspace_state: dict[str, object] | None,
     library_sort: str | None,
 ):
-    """Résout un titre visible vers sa position réelle dans la file avant renommage."""
+    """Renomme par identifiant stable, sans confondre bibliothèque et file active."""
 
     target = str(rename_target or "").strip()
     state = normalise_workspace(workspace_state or load_workspace())
     order = _workspace_order(state)
-    index: int | None = None
+    item_id: str | None = None
 
     if target.startswith("item:"):
-        item_id = target.removeprefix("item:")
-        if item_id in order:
-            index = order.index(item_id)
+        candidate = target.removeprefix("item:")
+        item_id = candidate if candidate in order else None
     elif target.startswith("library:"):
         try:
             library_index = int(target.removeprefix("library:"))
             item_id = _workspace_library_ids(state, library_sort)[library_index]
-            index = order.index(item_id)
         except (IndexError, TypeError, ValueError):
-            index = None
+            item_id = None
     elif target.startswith("queue:"):
         try:
             index = int(target.removeprefix("queue:"))
         except ValueError:
-            index = None
+            index = -1
+        return rename_audio_by_index_ui(
+            audio_files,
+            index,
+            proposed_name,
+            audio_names,
+        )
     else:
         try:
             index = int(float(target))
         except (TypeError, ValueError):
-            index = None
+            index = -1
+        return rename_audio_by_index_ui(
+            audio_files,
+            index,
+            proposed_name,
+            audio_names,
+        )
 
-    if index is None:
+    item = _workspace_items(state).get(item_id or "")
+    if not isinstance(item, dict):
         raise gr.Error("Cet audio n'est plus disponible pour le renommage.")
-    return rename_audio_by_index_ui(
-        audio_files,
-        index,
-        proposed_name,
-        audio_names,
+    source = Path(str(item.get("path") or ""))
+    if not source.is_file():
+        raise gr.Error("Le fichier audio associé à cette fiche est introuvable.")
+
+    clean_stem = _clean_audio_stem(proposed_name, source)
+    display_name = f"{clean_stem}{source.suffix}"
+    paths = _normalise_audio_paths(audio_files)
+    names = {
+        _audio_key(path): _display_audio_name(path, audio_names)
+        for path in paths
+    }
+    for current_id in order:
+        current = _workspace_items(state).get(current_id)
+        if not isinstance(current, dict):
+            continue
+        current_path = Path(str(current.get("path") or ""))
+        if current_path:
+            names[str(current_path)] = str(current.get("name") or current_path.name)
+    names[str(source)] = display_name
+    selected = str(paths[0]) if paths else None
+    return (
+        names,
+        _initial_queue_rows(paths, names),
+        _queue_hint(paths, f"Nom enregistré : {display_name}"),
+        gr.Dropdown(
+            choices=_rename_choices(paths, names),
+            value=selected,
+            interactive=bool(paths),
+        ),
+        gr.Textbox(
+            value=_rename_stem(names[selected]) if selected else "",
+            interactive=bool(paths),
+        ),
+        gr.Button(interactive=bool(paths)),
     )
 
 
@@ -5232,7 +5355,7 @@ def delete_audio_by_target_ui(
             item_id = None
     elif target.startswith("queue:"):
         try:
-            item_id = order[int(target.removeprefix("queue:"))]
+            item_id = _workspace_queue_ids(state)[int(target.removeprefix("queue:"))]
         except (IndexError, TypeError, ValueError):
             item_id = None
     elif target.startswith("item:"):
@@ -5294,10 +5417,55 @@ def _workspace_order(state: dict[str, object] | None) -> list[str]:
     return [str(value) for value in order] if isinstance(order, list) else []
 
 
+def _workspace_queue_ids(state: dict[str, object] | None) -> list[str]:
+    """Retourne uniquement l'ordre de la file active, jamais l'historique terminé."""
+
+    items = _workspace_items(state)
+    has_explicit_queue = isinstance(state, dict) and "queue_order" in state
+    raw_queue = (state or {}).get("queue_order", [])
+    queue_order = (
+        [str(value) for value in raw_queue]
+        if has_explicit_queue and isinstance(raw_queue, list)
+        else _workspace_order(state)
+    )
+    active_ids = JOB_MANAGER.active_item_ids()
+    ids: list[str] = []
+    for item_id in queue_order:
+        item = items.get(item_id)
+        if not isinstance(item, dict) or item_id in ids:
+            continue
+        completed = (
+            str(item.get("status") or "") == "Terminé"
+            and isinstance(item.get("result"), dict)
+        )
+        if not completed:
+            ids.append(item_id)
+    for item_id in _workspace_order(state):
+        item = items.get(item_id)
+        if (
+            isinstance(item, dict)
+            and item_id in active_ids
+            and item_id not in ids
+        ):
+            ids.append(item_id)
+    return ids
+
+
+def _workspace_queue_assets(
+    state: dict[str, object] | None,
+) -> list[tuple[str, Path]]:
+    items = _workspace_items(state)
+    return [
+        (item_id, path)
+        for item_id in _workspace_queue_ids(state)
+        if (path := Path(str(items.get(item_id, {}).get("path") or ""))).is_file()
+    ]
+
+
 def _workspace_queue_rows(state: dict[str, object] | None) -> list[list[object]]:
     items = _workspace_items(state)
     rows: list[list[object]] = []
-    for index, item_id in enumerate(_workspace_order(state), start=1):
+    for index, item_id in enumerate(_workspace_queue_ids(state), start=1):
         item = items.get(item_id, {})
         progress = max(0.0, min(1.0, float(item.get("progress") or 0.0)))
         rows.append(
@@ -6768,7 +6936,8 @@ def sync_workspace_ui(
     paths = _normalise_audio_paths(audio_files)
     state = normalise_workspace(workspace_state or load_workspace())
     items = _workspace_items(state)
-    order: list[str] = []
+    library_order = _workspace_order(state)
+    queue_order: list[str] = []
     timestamp = datetime.now().isoformat(timespec="seconds")
 
     for source in paths:
@@ -6816,12 +6985,24 @@ def sync_workspace_ui(
             "updated_at": str(previous.get("updated_at") or timestamp),
         }
         items[item_id] = item
-        order.append(item_id)
+        if item_id not in library_order:
+            library_order.append(item_id)
+        completed = (
+            str(item.get("status") or "") == "Terminé"
+            and isinstance(item.get("result"), dict)
+        )
+        if not completed and item_id not in queue_order:
+            queue_order.append(item_id)
 
-    state["order"] = order
+    for active_id in JOB_MANAGER.active_item_ids():
+        if active_id in items and active_id not in queue_order:
+            queue_order.append(active_id)
+    state["order"] = library_order
+    state["queue_order"] = queue_order
     state["items"] = items
     state = _save_workspace_from_ui(state)
-    selected = order[0] if order else None
+    queue_order = _workspace_queue_ids(state)
+    selected = queue_order[0] if queue_order else (library_order[0] if library_order else None)
     payload = _fiche_payload(selected, state)
     return (
         state,
@@ -6829,7 +7010,7 @@ def sync_workspace_ui(
         gr.Dropdown(
             choices=_workspace_choices(state),
             value=selected,
-            interactive=bool(order),
+            interactive=bool(library_order),
         ),
         *payload,
         _dashboard_html(state),
@@ -6842,36 +7023,38 @@ def sync_workspace_names_ui(
     workspace_state: dict[str, object] | None,
     selected_item: str | None,
 ):
-    paths = _normalise_audio_paths(audio_files)
     state = normalise_workspace(workspace_state or load_workspace())
     items = _workspace_items(state)
     order = _workspace_order(state)
-    visible_paths: list[Path] = []
-    visible_names: dict[str, str] = {}
-    for index, source in enumerate(paths):
-        if index >= len(order):
-            break
-        item_id = order[index]
+    proposed_names = audio_names or {}
+    for item_id in order:
         item = items.get(item_id)
-        if isinstance(item, dict):
-            display_name = _display_audio_name(source, audio_names)
-            item["name"] = display_name
-            item["source_path"] = str(source)
-            item["updated_at"] = datetime.now().isoformat(timespec="seconds")
-            managed_path = Path(str(item.get("path") or source))
-            if managed_path.is_file():
-                try:
-                    managed_path = rename_library_audio(
-                        item_id,
-                        managed_path,
-                        display_name,
-                    )
-                except (FileExistsError, OSError, ValueError):
-                    pass
-            item["path"] = str(managed_path)
-            visible_paths.append(managed_path)
-            visible_names[str(managed_path)] = display_name
+        if not isinstance(item, dict):
+            continue
+        managed_path = Path(str(item.get("path") or ""))
+        source_path = str(item.get("source_path") or "")
+        display_name = proposed_names.get(str(managed_path)) or proposed_names.get(source_path)
+        if not display_name:
+            continue
+        item["name"] = str(display_name)
+        item["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        if managed_path.is_file():
+            try:
+                managed_path = rename_library_audio(
+                    item_id,
+                    managed_path,
+                    str(display_name),
+                )
+            except (FileExistsError, OSError, ValueError):
+                pass
+        item["path"] = str(managed_path)
     state = _save_workspace_from_ui(state)
+    queue_assets = _workspace_queue_assets(state)
+    visible_paths = [path for _, path in queue_assets]
+    visible_names = {
+        str(path): str(_workspace_items(state)[item_id].get("name") or path.name)
+        for item_id, path in queue_assets
+    }
     selected = selected_item if selected_item in order else (order[0] if order else None)
     return (
         [str(path) for path in visible_paths],
@@ -6923,7 +7106,7 @@ def select_queue_fiche_ui(
     evt: gr.SelectData,
 ):
     index = evt.index[0] if isinstance(evt.index, (list, tuple)) else evt.index
-    order = _workspace_order(workspace_state)
+    order = _workspace_queue_ids(workspace_state)
     try:
         item_id = order[int(index)]
     except (IndexError, TypeError, ValueError):
@@ -7851,58 +8034,66 @@ def _prepare_transcription_workspace(
     persistent = workspace_state is not None
     state = normalise_workspace(workspace_state or blank_workspace())
     items = _workspace_items(state)
-    order = _workspace_order(state)
-
-    if len(order) != len(sources):
-        order = []
-        timestamp = datetime.now().isoformat(timespec="seconds")
-        for index, source in enumerate(sources):
-            if persistent:
-                item_id, stored_path = import_audio(source)
-            else:
-                item_id, stored_path = f"session-{index}-{uuid.uuid4().hex[:8]}", source
-            previous = items.get(item_id, {})
-            items[item_id] = {
-                "id": item_id,
-                "path": str(stored_path),
-                "source_path": str(source),
-                "original_name": str(previous.get("original_name") or source.name),
-                "name": _display_audio_name(source, audio_names),
-                "status": str(previous.get("status") or "En attente"),
-                "progress": float(previous.get("progress") or 0.0),
-                "processing_time": str(previous.get("processing_time") or "—"),
-                "processing_seconds": float(previous.get("processing_seconds") or 0.0),
-                "partial": str(previous.get("partial") or ""),
-                "stage": str(previous.get("stage") or ""),
-                "settings": previous.get("settings") if isinstance(previous.get("settings"), dict) else {},
-                "run_id": str(previous.get("run_id") or ""),
-                "checkpoint_position": float(previous.get("checkpoint_position") or 0.0),
-                "resume_count": int(previous.get("resume_count") or 0),
-                "heartbeat": str(previous.get("heartbeat") or ""),
-                "result": previous.get("result") if isinstance(previous.get("result"), dict) else None,
-                "files": previous.get("files") if isinstance(previous.get("files"), list) else [],
-                "comments": previous.get("comments") if isinstance(previous.get("comments"), list) else [],
-                "speaker_roles": (
-                    previous.get("speaker_roles")
-                    if isinstance(previous.get("speaker_roles"), dict)
-                    else {}
-                ),
-                "assistant_queries": (
-                    previous.get("assistant_queries")
-                    if isinstance(previous.get("assistant_queries"), list)
-                    else []
-                ),
-                "error": "",
-                "created_at": str(previous.get("created_at") or timestamp),
-                "updated_at": timestamp,
-            }
-            order.append(item_id)
+    library_order = _workspace_order(state)
+    queue_order: list[str] = []
+    timestamp = datetime.now().isoformat(timespec="seconds")
+    for index, source in enumerate(sources):
+        if persistent:
+            item_id, stored_path = import_audio(source)
+        else:
+            item_id, stored_path = f"session-{index}-{uuid.uuid4().hex[:8]}", source
+        previous = items.get(item_id, {})
+        item = {
+            "id": item_id,
+            "path": str(stored_path),
+            "source_path": str(source),
+            "original_name": str(previous.get("original_name") or source.name),
+            "name": _display_audio_name(source, audio_names),
+            "status": str(previous.get("status") or "En attente"),
+            "progress": float(previous.get("progress") or 0.0),
+            "processing_time": str(previous.get("processing_time") or "—"),
+            "processing_seconds": float(previous.get("processing_seconds") or 0.0),
+            "partial": str(previous.get("partial") or ""),
+            "stage": str(previous.get("stage") or ""),
+            "settings": previous.get("settings") if isinstance(previous.get("settings"), dict) else {},
+            "run_id": str(previous.get("run_id") or ""),
+            "checkpoint_position": float(previous.get("checkpoint_position") or 0.0),
+            "resume_count": int(previous.get("resume_count") or 0),
+            "heartbeat": str(previous.get("heartbeat") or ""),
+            "result": previous.get("result") if isinstance(previous.get("result"), dict) else None,
+            "files": previous.get("files") if isinstance(previous.get("files"), list) else [],
+            "comments": previous.get("comments") if isinstance(previous.get("comments"), list) else [],
+            "speaker_roles": (
+                previous.get("speaker_roles")
+                if isinstance(previous.get("speaker_roles"), dict)
+                else {}
+            ),
+            "assistant_queries": (
+                previous.get("assistant_queries")
+                if isinstance(previous.get("assistant_queries"), list)
+                else []
+            ),
+            "error": "",
+            "created_at": str(previous.get("created_at") or timestamp),
+            "updated_at": timestamp,
+        }
+        items[item_id] = item
+        if item_id not in library_order:
+            library_order.append(item_id)
+        completed = (
+            str(item.get("status") or "") == "Terminé"
+            and isinstance(item.get("result"), dict)
+        )
+        if not completed and item_id not in queue_order:
+            queue_order.append(item_id)
 
     state["items"] = items
-    state["order"] = order
+    state["order"] = library_order
+    state["queue_order"] = queue_order
     if persistent:
         state = _save_workspace_from_ui(state)
-    return state, order, persistent
+        queue_order = _workspace_queue_ids(state)
+    return state, queue_order, persistent
 
 
 def _update_transcription_workspace(
@@ -7987,24 +8178,56 @@ def _workspace_status_markdown(state: dict[str, object]) -> str:
             f"{stage}.{checkpoint_note} Vous pouvez rafraîchir ou fermer cet onglet : "
             "le traitement local continue."
         )
+    queue_ids = _workspace_queue_ids(state)
     resumable = [
         item_id
-        for item_id in order
+        for item_id in queue_ids
         if str(items.get(item_id, {}).get("status") or "") == "À reprendre"
     ]
     if resumable:
+        count = len(resumable)
+        noun = "audio" if count == 1 else "audios"
+        verb = "possède" if count == 1 else "possèdent"
         return (
             "### Reprise disponible\n\n"
-            f"**{len(resumable)} audio(s)** possèdent un checkpoint local. "
+            f"**{count} {noun}** {verb} un checkpoint local. "
             "Relancez la file pour reprendre au dernier passage enregistré."
+        )
+    if queue_ids:
+        count = len(queue_ids)
+        noun = "audio" if count == 1 else "audios"
+        failed = sum(
+            1
+            for item_id in queue_ids
+            if str(items.get(item_id, {}).get("status") or "") == "Échec"
+        )
+        if failed:
+            verb = "est" if count == 1 else "sont"
+            return (
+                "### Relance disponible\n\n"
+                f"**{count} {noun}** {verb} dans la file, dont **{failed}** à réessayer."
+            )
+        verb = "attend" if count == 1 else "attendent"
+        possessive = "son" if count == 1 else "leur"
+        return (
+            "### File prête\n\n"
+            f"**{count} {noun}** {verb} {possessive} traitement dans l'ordre affiché."
         )
     completed = sum(
         1 for item_id in order if items.get(item_id, {}).get("status") == "Terminé"
     )
-    if order and completed == len(order):
-        return "### File terminée\n\nToutes les transcriptions sont enregistrées sur cet ordinateur."
+    if completed:
+        noun = "transcription" if completed == 1 else "transcriptions"
+        adjective = "disponible" if completed == 1 else "disponibles"
+        return (
+            "### Aucun audio en attente\n\n"
+            f"**{completed} {noun}** {adjective} dans l'onglet Fiches."
+        )
     if order:
-        return f"### Espace restauré\n\n**{len(order)} fiche(s) audio** retrouvée(s) sur cet ordinateur."
+        return (
+            "### File vide\n\n"
+            "Les enregistrements conservés restent disponibles dans l'onglet Fiches."
+        )
     return "### Prêt\n\nLes modèles sont installés. Ajoutez vos audios pour commencer."
 
 
@@ -8030,11 +8253,7 @@ def restore_workspace_ui():
     if library_changed:
         state = _save_workspace_from_ui(state)
         items = _workspace_items(state)
-    available = [
-        (item_id, Path(str(items[item_id].get("path") or "")))
-        for item_id in _workspace_order(state)
-        if item_id in items and Path(str(items[item_id].get("path") or "")).is_file()
-    ]
+    available = _workspace_queue_assets(state)
     paths = [path for _, path in available]
     names = {
         str(path): str(items[item_id].get("name") or path.name)
@@ -8076,7 +8295,7 @@ def restore_workspace_ui():
         [str(path) for path in paths],
         str(paths[0]) if paths else None,
         _workspace_queue_rows(state),
-        _queue_hint(paths, "Espace de travail restauré." if paths else ""),
+        _queue_hint(paths, "File restaurée." if paths else ""),
         names,
         gr.Dropdown(
             choices=rename_choices,
@@ -8104,6 +8323,10 @@ def restore_workspace_ui():
         metadata,
         status,
         _dashboard_html(state),
+        gr.Button(
+            value="Lancer la file d'attente",
+            interactive=bool(paths),
+        ),
     )
 
 
@@ -8192,6 +8415,24 @@ def poll_workspace_ui(
             interactive=bool(selected_comment),
         ),
         gr.skip() if reply_target_is_valid else "",
+    )
+
+
+def poll_workspace_queue_ui(audio_files: object = None):
+    """Synchronise l'uploader sans modifier le contrat historique du poll principal."""
+
+    state = load_workspace()
+    queue_paths = [path for _, path in _workspace_queue_assets(state)]
+    visible_paths = _normalise_audio_paths(audio_files)
+    if [str(path) for path in visible_paths] == [str(path) for path in queue_paths]:
+        return (gr.skip(), gr.skip(), gr.skip())
+    return (
+        [str(path) for path in queue_paths],
+        _queue_hint(queue_paths),
+        gr.Button(
+            value="Lancer la file d'attente",
+            interactive=bool(queue_paths),
+        ),
     )
 
 
@@ -8284,7 +8525,10 @@ def transcribe_ui(
                 "La page est reconnectée au worker local ; aucun doublon n'a été lancé."
             )
         else:
-            status = "### File terminée\n\nTous les audios possèdent déjà une transcription."
+            status = (
+                "### Aucun audio en attente\n\n"
+                "Les transcriptions terminées sont disponibles dans l'onglet Fiches."
+            )
         yield (
             status,
             _workspace_queue_rows(workspace),
@@ -8789,12 +9033,7 @@ def _build_app_single_page() -> gr.Blocks:
     initial_workspace = load_workspace()
     initial_items = _workspace_items(initial_workspace)
     initial_order = _workspace_order(initial_workspace)
-    initial_available = [
-        (item_id, Path(str(initial_items[item_id].get("path") or "")))
-        for item_id in initial_order
-        if item_id in initial_items
-        and Path(str(initial_items[item_id].get("path") or "")).is_file()
-    ]
+    initial_available = _workspace_queue_assets(initial_workspace)
     initial_paths = [path for _, path in initial_available]
     initial_names = {
         str(path): str(initial_items[item_id].get("name") or path.name)
@@ -8858,6 +9097,7 @@ def _build_app_single_page() -> gr.Blocks:
             current_metadata = gr.State(initial_metadata)
             audio_names = gr.State(initial_names)
             workspace_state = gr.State(initial_workspace)
+            legacy_dashboard = gr.State("")
 
             gr.HTML(
                 f"""
@@ -8975,9 +9215,9 @@ def _build_app_single_page() -> gr.Blocks:
 
             with gr.Group(elem_classes=["glass-card"]):
                 gr.HTML(
-                    "<div class='section-heading'><div><span class='eyebrow'>Portefeuille audio</span>"
-                    "<h2>File d'attente et historique</h2></div>"
-                    "<p>Cliquez sur une ligne pour ouvrir sa fiche.</p></div>"
+                    "<div class='section-heading'><div><span class='eyebrow'>File active</span>"
+                    "<h2>Audios à traiter</h2></div>"
+                    "<p>Les éléments terminés restent disponibles dans les fiches audio.</p></div>"
                 )
                 queue_table = gr.Dataframe(
                     headers=QUEUE_HEADERS,
@@ -9011,14 +9251,11 @@ def _build_app_single_page() -> gr.Blocks:
                 variant="primary",
                 size="lg",
                 elem_classes=["primary-btn"],
+                interactive=bool(initial_paths),
             )
 
             status = gr.Markdown(
-                (
-                    f"### Espace restauré\n\n**{len(initial_order)} fiche(s) audio** disponible(s)."
-                    if initial_order
-                    else "### Prêt\n\nLes modèles sont installés. Ajoutez vos audios pour commencer."
-                ),
+                _workspace_status_markdown(initial_workspace),
                 elem_classes=["status-copy", "glass-card", "status-banner"],
             )
 
@@ -9159,6 +9396,7 @@ def _build_app_single_page() -> gr.Blocks:
                     rename_selector,
                     rename_input,
                     rename_button,
+                    transcribe_button,
                 ],
                 queue=False,
             )
@@ -9454,6 +9692,8 @@ def _build_app_single_page() -> gr.Blocks:
                 batch_state,
                 current_metadata,
                 status,
+                legacy_dashboard,
+                transcribe_button,
             ],
             show_progress="hidden",
         )
@@ -9482,12 +9722,7 @@ def build_app() -> gr.Blocks:
     initial_engine = _workspace_engine_preference(initial_workspace)
     initial_items = _workspace_items(initial_workspace)
     initial_order = _workspace_order(initial_workspace)
-    initial_available = [
-        (item_id, Path(str(initial_items[item_id].get("path") or "")))
-        for item_id in initial_order
-        if item_id in initial_items
-        and Path(str(initial_items[item_id].get("path") or "")).is_file()
-    ]
+    initial_available = _workspace_queue_assets(initial_workspace)
     initial_paths = [path for _, path in initial_available]
     initial_names = {
         str(path): str(initial_items[item_id].get("name") or path.name)
@@ -9666,7 +9901,7 @@ def build_app() -> gr.Blocks:
                         gr.HTML(
                             """
                             <section class="page-hero">
-                              <div><span class="eyebrow">Bibliothèque</span><h2>Audios et file d'attente</h2><p>Ajoutez plusieurs enregistrements, renommez-les puis réorganisez l'ordre de traitement par glisser-déposer.</p></div>
+                              <div><span class="eyebrow">Traitement audio</span><h2>File de traitement</h2><p>Ajoutez les prochains enregistrements et organisez leur ordre. Une fois terminés, ils restent disponibles dans Fiches.</p></div>
                               <span class="page-hero-note">Traitement séquentiel et local</span>
                             </section>
                             """
@@ -9675,15 +9910,15 @@ def build_app() -> gr.Blocks:
                             with gr.Column(scale=3, min_width=430):
                                 with gr.Group(elem_classes=["glass-card"]):
                                     gr.HTML(
-                                        "<p class='step-title'>Ajouter et organiser</p>"
-                                        "<p class='step-copy'>Les fichiers restent dans votre bibliothèque locale jusqu'à leur suppression.</p>"
+                                        "<p class='step-title'>Ajouter à la file</p>"
+                                        "<p class='step-copy'>Seuls les audios encore à traiter apparaissent ici.</p>"
                                     )
                                     audio_queue = gr.File(
                                         value=[str(path) for path in initial_paths],
                                         file_count="multiple",
                                         file_types=["audio"],
                                         type="filepath",
-                                        label="File d'attente",
+                                        label="Audios à traiter",
                                         height=258,
                                         interactive=True,
                                         allow_reordering=True,
@@ -9692,7 +9927,7 @@ def build_app() -> gr.Blocks:
                                     queue_hint = gr.HTML(
                                         _queue_hint(
                                             initial_paths,
-                                            "Espace de travail restauré." if initial_paths else "",
+                                            "File restaurée." if initial_paths else "",
                                         )
                                     )
                                     gr.HTML(
@@ -9728,21 +9963,30 @@ def build_app() -> gr.Blocks:
                                         variant="primary",
                                         size="lg",
                                         elem_classes=["primary-btn"],
+                                        interactive=bool(initial_paths),
                                     )
-                                job_status = gr.Markdown(
-                                    (
-                                        f"### Espace restauré\n\n**{len(initial_order)} fiche(s) audio** disponible(s)."
-                                        if initial_order
-                                        else "### Prêt\n\nLes modèles sont installés. Ajoutez vos audios pour commencer."
-                                    ),
-                                    elem_id="queue-job-status",
-                                )
+                                    job_status = gr.Markdown(
+                                        _workspace_status_markdown(initial_workspace),
+                                        elem_id="queue-job-status",
+                                    )
 
-                        with gr.Group(elem_classes=["glass-card", "table-card"]):
+                        with gr.Group(
+                            elem_id="queue-active-card",
+                            elem_classes=["glass-card", "settings-card"],
+                        ):
+                            with gr.Row(elem_classes=["library-toolbar", "queue-toolbar"]):
+                                gr.HTML(
+                                    "<div class='library-toolbar-copy'><span class='eyebrow'>File active</span>"
+                                    "<h3>Audios à traiter</h3><p>Suivez uniquement les enregistrements en attente, en cours ou à reprendre.</p></div>"
+                                )
+                                gr.HTML(
+                                    "<div class='queue-flow-note'><span>Ordre de traitement</span>"
+                                    "<strong>Du haut vers le bas</strong></div>"
+                                )
                             gr.HTML(
-                                "<div class='section-heading'><div><span class='eyebrow'>Portefeuille audio</span>"
-                                "<h2>Suivi du traitement</h2></div>"
-                                "<p>Sélectionnez une ligne, puis ouvrez l'onglet Fiches pour consulter son détail.</p></div>"
+                                "<div id='queue-empty-state' role='status' aria-live='polite'>"
+                                "<div class='queue-empty-copy'><strong>La file est à jour</strong>"
+                                "<span>Aucun audio ne reste à traiter. Retrouvez les transcriptions terminées dans Fiches.</span></div></div>"
                             )
                             queue_table = gr.Dataframe(
                                 headers=QUEUE_HEADERS,
@@ -10350,6 +10594,7 @@ def build_app() -> gr.Blocks:
                     rename_selector,
                     rename_input,
                     rename_button,
+                    transcribe_button,
                 ],
                 queue=False,
             )
@@ -10504,6 +10749,7 @@ def build_app() -> gr.Blocks:
                     current_metadata,
                     job_status,
                     dashboard,
+                    transcribe_button,
                 ],
                 queue=False,
             )
@@ -11041,6 +11287,14 @@ def build_app() -> gr.Blocks:
                 trigger_mode="always_last",
                 show_progress="hidden",
             )
+            workspace_timer.tick(
+                fn=poll_workspace_queue_ui,
+                inputs=[audio_queue],
+                outputs=[audio_queue, queue_hint, transcribe_button],
+                queue=False,
+                trigger_mode="always_last",
+                show_progress="hidden",
+            )
 
         setup_outputs = [
             setup_progress,
@@ -11122,6 +11376,7 @@ def build_app() -> gr.Blocks:
                 current_metadata,
                 job_status,
                 dashboard,
+                transcribe_button,
             ],
             show_progress="hidden",
         )

@@ -1,0 +1,204 @@
+name: Construire Studio Audio pour Windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version numérique du logiciel (ex. 0.3.1)"
+        required: true
+        default: "0.3.1"
+        type: string
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: studio-audio-windows-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Windows x64
+    runs-on: windows-2025
+    timeout-minutes: 150
+
+    steps:
+      - name: Télécharger le projet
+        uses: actions/checkout@v6
+
+      - name: Installer Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: x64
+          cache: pip
+          cache-dependency-path: |
+            requirements-desktop.txt
+            requirements-openvino.txt
+
+      - name: Installer Inno Setup 6
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          choco install innosetup --yes --no-progress
+          $iscc = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path -LiteralPath $iscc)) {
+            throw "Inno Setup 6 n'a pas été installé à l'emplacement attendu : $iscc"
+          }
+          $isccDirectory = Split-Path -Parent $iscc
+          $isccDirectory | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Construire l'application et le Setup
+        id: package
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ inputs.version || github.ref_name }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = $env:RELEASE_VERSION -replace '^v', ''
+          $pythonPath = Join-Path $env:pythonLocation "python.exe"
+          & scripts/build_desktop_windows.ps1 -Version $version -PythonPath $pythonPath -SkipPortable
+
+          $setup = Join-Path $PWD "packages\StudioAudio-Windows-x64-Setup-$version.exe"
+          if (-not (Test-Path -LiteralPath $setup)) {
+            throw "Le Setup Windows attendu est absent : $setup"
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "setup=$setup" >> $env:GITHUB_OUTPUT
+
+      - name: Installer silencieusement le véritable Setup
+        id: install
+        shell: pwsh
+        env:
+          SETUP_PATH: ${{ steps.package.outputs.setup }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installDirectory = Join-Path $env:RUNNER_TEMP "studio-audio-installed"
+          if (Test-Path -LiteralPath $installDirectory) {
+            Remove-Item -LiteralPath $installDirectory -Recurse -Force
+          }
+          New-Item -ItemType Directory -Force -Path $installDirectory | Out-Null
+
+          $arguments = @(
+            "/VERYSILENT",
+            "/SUPPRESSMSGBOXES",
+            "/NORESTART",
+            "/SP-",
+            "/MERGETASKS=!desktopicon",
+            "/DIR=`"$installDirectory`""
+          )
+          $installer = Start-Process `
+            -FilePath $env:SETUP_PATH `
+            -ArgumentList $arguments `
+            -PassThru `
+            -Wait
+          if ($installer.ExitCode -ne 0) {
+            throw "Le véritable Setup a échoué avec le code $($installer.ExitCode)."
+          }
+
+          $installedExecutable = Join-Path $installDirectory "TranscriptionLocale.exe"
+          if (-not (Test-Path -LiteralPath $installedExecutable)) {
+            throw "L'exécutable installé est absent : $installedExecutable"
+          }
+          "directory=$installDirectory" >> $env:GITHUB_OUTPUT
+          "executable=$installedExecutable" >> $env:GITHUB_OUTPUT
+
+      - name: Tester l'exécutable réellement installé
+        id: smoke
+        shell: pwsh
+        timeout-minutes: 8
+        env:
+          INSTALLED_EXECUTABLE: ${{ steps.install.outputs.executable }}
+          SMOKE_TIMEOUT_MILLISECONDS: "240000"
+        run: |
+          $ErrorActionPreference = "Stop"
+          $smokeData = Join-Path $env:RUNNER_TEMP "studio-audio-smoke-data"
+          $smokeArtifacts = Join-Path $PWD "output\desktop\windows\smoke-installed"
+          foreach ($path in @($smokeData, $smokeArtifacts)) {
+            if (Test-Path -LiteralPath $path) {
+              Remove-Item -LiteralPath $path -Recurse -Force
+            }
+            New-Item -ItemType Directory -Force -Path $path | Out-Null
+          }
+
+          $env:TRANSCRIPTION_APP_DATA_DIR = $smokeData
+          $env:GRADIO_ANALYTICS_ENABLED = "False"
+          $env:HF_HUB_DISABLE_TELEMETRY = "1"
+          $env:DO_NOT_TRACK = "1"
+          $env:TOKENIZERS_PARALLELISM = "false"
+          $env:NO_PROXY = "127.0.0.1,localhost"
+          $env:no_proxy = "127.0.0.1,localhost"
+
+          $process = Start-Process `
+            -FilePath $env:INSTALLED_EXECUTABLE `
+            -ArgumentList "--smoke-test" `
+            -WorkingDirectory $PWD `
+            -WindowStyle Hidden `
+            -PassThru
+          $completed = $process.WaitForExit([int]$env:SMOKE_TIMEOUT_MILLISECONDS)
+          if (-not $completed) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            throw "Le smoke test du binaire installé a dépassé 240 secondes."
+          }
+          $process.Refresh()
+          if ($process.ExitCode -ne 0) {
+            throw "Le smoke test du binaire installé a échoué avec le code $($process.ExitCode)."
+          }
+
+          $applicationLog = Join-Path $smokeData "logs\application.log"
+          if (-not (Test-Path -LiteralPath $applicationLog)) {
+            throw "Le journal du smoke test installé est absent : $applicationLog"
+          }
+          Copy-Item -LiteralPath $applicationLog -Destination (Join-Path $smokeArtifacts "application.log")
+          if (-not (Select-String -LiteralPath $applicationLog -Pattern "smoke test bureau : ok" -Quiet)) {
+            throw "Le journal ne confirme pas la réussite du smoke test installé."
+          }
+
+          Start-Sleep -Seconds 2
+          $expectedPath = [System.IO.Path]::GetFullPath($env:INSTALLED_EXECUTABLE)
+          $lingering = Get-CimInstance Win32_Process | Where-Object {
+            $_.ExecutablePath -and
+            [string]::Equals(
+              [System.IO.Path]::GetFullPath($_.ExecutablePath),
+              $expectedPath,
+              [System.StringComparison]::OrdinalIgnoreCase
+            )
+          }
+          if ($lingering) {
+            $lingering | ForEach-Object {
+              Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+            }
+            throw "Un processus du binaire installé est resté actif après le smoke test."
+          }
+
+      - name: Publier les journaux si le Setup installé échoue
+        if: ${{ failure() && (steps.install.outcome == 'failure' || steps.smoke.outcome == 'failure') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: StudioAudio-Windows-x64-smoke-echec
+          path: output/desktop/windows/smoke-installed/**
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Publier le Setup validé
+        uses: actions/upload-artifact@v7
+        with:
+          name: StudioAudio-Windows-x64
+          path: ${{ steps.package.outputs.setup }}
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Résumé de livraison
+        shell: pwsh
+        run: |
+          @"
+          ### Studio Audio Windows x64
+
+          Le livrable publié est le **lanceur Setup.exe** prêt à transmettre.
+          Le véritable Setup a été installé silencieusement dans un dossier vierge, puis son exécutable installé a passé le smoke test local complet.
+          Le contrôle valide les ressources embarquées, le serveur local, son arrêt propre et l'absence de processus résiduel.
+          "@ >> $env:GITHUB_STEP_SUMMARY

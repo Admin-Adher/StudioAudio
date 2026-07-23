@@ -165,6 +165,10 @@ class TranscriptionJobManager:
                 current_items = state_to_update.get("items")
                 if not isinstance(current_items, dict):
                     return
+                queue_order = state_to_update.setdefault("queue_order", [])
+                if not isinstance(queue_order, list):
+                    queue_order = []
+                    state_to_update["queue_order"] = queue_order
                 for item_id in candidates:
                     item = current_items.get(item_id)
                     if not isinstance(item, dict):
@@ -174,6 +178,8 @@ class TranscriptionJobManager:
                         item["status"] = "En attente"
                     item["error"] = ""
                     item["updated_at"] = _now()
+                    if item_id not in queue_order:
+                        queue_order.append(item_id)
 
             mutate_workspace(persist)
             added: list[str] = []

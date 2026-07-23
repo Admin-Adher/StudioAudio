@@ -150,10 +150,12 @@ class DurableJobManagerTests(unittest.TestCase):
 
                 release.set()
                 self.assertTrue(manager.wait_until_idle(5))
-                completed = workspace.load_workspace()["items"][item_id]
+                completed_workspace = workspace.load_workspace()
+                completed = completed_workspace["items"][item_id]
                 self.assertEqual(completed["status"], "Terminé")
                 self.assertEqual(completed["progress"], 1.0)
                 self.assertIn("terminé", completed["partial"])
+                self.assertNotIn(item_id, completed_workspace["queue_order"])
                 self.assertIsNone(workspace.load_checkpoint(item_id))
                 self.assertEqual(received_engines, ["openvino-arc-pilot"])
 

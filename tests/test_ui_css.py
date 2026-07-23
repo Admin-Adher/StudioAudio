@@ -70,9 +70,27 @@ class DesktopResponsiveCssTests(unittest.TestCase):
         self.assertIn('#fiche-library-table .header-cell[data-heading="1"]', responsive)
         self.assertIn("display: none !important", responsive)
 
-    def test_queue_status_is_a_flat_note_instead_of_a_nested_card(self) -> None:
+    def test_queue_status_uses_only_one_compact_surface(self) -> None:
         self.assertIn("#queue-job-status", CUSTOM_CSS)
-        self.assertIn("border-left: 2px solid", CUSTOM_CSS)
+        self.assertIn('#queue-job-status [data-testid="markdown"].prose', CUSTOM_CSS)
+        self.assertIn("border-left: 0 !important", CUSTOM_CSS)
+        self.assertNotIn("#queue-job-status .prose {\n  padding: 9px 12px", CUSTOM_CSS)
+
+    def test_active_queue_has_a_real_empty_state_and_hides_its_empty_table(self) -> None:
+        self.assertIn("#queue-empty-state", CUSTOM_CSS)
+        self.assertIn(
+            "#queue-active-card:not(:has(#queue-table .virtual-row)) #queue-table",
+            CUSTOM_CSS,
+        )
+        self.assertIn(
+            "#queue-active-card:has(#queue-table .virtual-row) #queue-empty-state",
+            CUSTOM_CSS,
+        )
+
+    def test_active_queue_columns_fill_the_desktop_table(self) -> None:
+        self.assertIn("#queue-table .table-container", CUSTOM_CSS)
+        self.assertIn('#queue-table .header-cell[data-heading="1"]', CUSTOM_CSS)
+        self.assertIn("flex: 0 0 34% !important", CUSTOM_CSS)
 
     def test_play_pause_icon_is_optically_centered_inside_its_circle(self) -> None:
         player = CUSTOM_CSS.split("#fiche-audio-player .play-pause-button {", 1)[1].split(

@@ -6,11 +6,11 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   exit 1
 fi
 
-VERSION="${1:-${TRANSCRIPTION_DESKTOP_VERSION:-0.2.0}}"
+VERSION="${1:-${TRANSCRIPTION_DESKTOP_VERSION:-0.3.1}}"
 REQUESTED_ARCH="${2:-${MACOS_TARGET_ARCH:-auto}}"
 
 if [[ ! "$VERSION" =~ ^[0-9]+(\.[0-9]+){1,2}$ ]]; then
-  echo "Version invalide : '$VERSION'. Utilisez une version numérique telle que 0.2.0." >&2
+  echo "Version invalide : '$VERSION'. Utilisez une version numérique telle que 0.3.1." >&2
   exit 1
 fi
 

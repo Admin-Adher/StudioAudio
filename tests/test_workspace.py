@@ -18,6 +18,30 @@ class WorkspacePersistenceTests(unittest.TestCase):
             state["preferences"]["transcription_engine"],
             "openvino-arc-pilot",
         )
+        self.assertEqual(state["queue_order"], [])
+
+    def test_legacy_workspace_migrates_only_actionable_items_into_the_queue(self) -> None:
+        migrated = workspace.normalise_workspace(
+            {
+                "version": 5,
+                "order": ["done", "waiting"],
+                "items": {
+                    "done": {
+                        "name": "Terminé.wav",
+                        "status": "Terminé",
+                        "result": {"turns": []},
+                    },
+                    "waiting": {
+                        "name": "À traiter.wav",
+                        "status": "En attente",
+                        "result": None,
+                    },
+                },
+            }
+        )
+
+        self.assertEqual(migrated["order"], ["done", "waiting"])
+        self.assertEqual(migrated["queue_order"], ["waiting"])
 
     @patch("transcription_locale.core.sys.platform", "win32")
     def test_engine_preference_is_persisted_and_unknown_values_use_the_default(self) -> None:
