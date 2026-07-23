@@ -138,6 +138,11 @@ class WindowsPackagingContractTests(unittest.TestCase):
         self.assertLess(server_smoke_position, assistant_smoke_position)
         self.assertLess(assistant_smoke_position, iscc_position)
         self.assertIn("WaitForExit(600000)", self.build_script)
+        self.assertIn("$AssistantSmokeProcess.WaitForExit()", self.build_script)
+        self.assertIn(
+            "$AssistantSmokeDetail = [string](",
+            self.build_script,
+        )
         self.assertIn('$env:HF_HUB_OFFLINE = "1"', self.build_script)
         self.assertIn('$env:TRANSFORMERS_OFFLINE = "1"', self.build_script)
         self.assertIn('"assistant-smoke.json"', self.build_script)

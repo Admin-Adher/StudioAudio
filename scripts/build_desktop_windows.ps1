@@ -268,13 +268,18 @@ if (-not $SkipBundledAssistantModel) {
             Stop-Process -Id $AssistantSmokeProcess.Id -Force -ErrorAction SilentlyContinue
             throw "Le smoke test Qwen Windows a dépassé le délai de 10 minutes."
         }
+        # Windows PowerShell 5.1 can leave ExitCode at $null after the timed
+        # overload when stdout/stderr are redirected. The final wait drains
+        # both streams and makes the exit code reliable.
+        $AssistantSmokeProcess.WaitForExit()
         $AssistantSmokeProcess.Refresh()
         if ($AssistantSmokeProcess.ExitCode -ne 0) {
             $AssistantSmokeDetail = ""
             if (Test-Path -LiteralPath $AssistantSmokeStderr) {
-                $AssistantSmokeDetail = (
+                $AssistantSmokeDetail = [string](
                     Get-Content -LiteralPath $AssistantSmokeStderr -Raw
-                ).Trim()
+                )
+                $AssistantSmokeDetail = $AssistantSmokeDetail.Trim()
             }
             throw (
                 "Le smoke test Qwen Windows a échoué avec le code " +
